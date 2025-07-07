@@ -1,0 +1,12 @@
+requests
+datetime
+pandas
+boto3
+pyarrow
+openpyxl
+Jinja2
+pathlib
+google-cloud-secret-manager
+google-cloud-storage
+google-cloud-bigquery
+google_auth_oauthlib
