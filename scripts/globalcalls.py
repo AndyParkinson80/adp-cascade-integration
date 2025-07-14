@@ -4,6 +4,7 @@ import math
 import time
 import json
 import os
+import sys
 import pandas as pd
 
 def global_data_calls(access_token,
@@ -25,23 +26,29 @@ def global_data_calls(access_token,
     print ("    Making global calls (" + time_now + ")")
 
     def GET_workers_adp():                                      
-        time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print ("        Retrieving Data from ADP Workforce Now (" + time_now + ")")
         api_url = 'https://api.adp.com/hr/v2/workers'
-        api_headers = {
-                'Authorization': f'Bearer {access_token}',
-                'Accept':"application/json;masked=false",  
-            }
-        api_count_params = {
-                "count": "true",
-            }
 
-        api_count_response = requests.get(api_url, cert=(certfile, keyfile), verify=True, headers=api_headers, params=api_count_params)                 #data request. Find number of records and uses this to find the pages needed
-        response_data = api_count_response.json()
-        total_number = response_data.get("meta", {}).get("totalNumber", 0)
-        rounded_total_number = math.ceil(total_number / 100) * 100
+        def max_staff_rounded_up_to_100():
+            time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print ("        Retrieving Data from ADP Workforce Now (" + time_now + ")")
+            api_headers = {
+                    'Authorization': f'Bearer {access_token}',
+                    'Accept':"application/json;masked=false",  
+                }
+            api_count_params = {
+                    "count": "true",
+                }
+
+            api_count_response = requests.get(api_url, cert=(certfile, keyfile), verify=True, headers=api_headers, params=api_count_params)                 #data request. Find number of records and uses this to find the pages needed
+            response_data = api_count_response.json()
+            total_number = response_data.get("meta", {}).get("totalNumber", 0)
+            rounded_total_number = math.ceil(total_number / 100) * 100
+            return rounded_total_number
+        
+        API_pagination_calls = max_staff_rounded_up_to_100()
 
         adp_responses = []                                                                                                                              # Initialize an empty list to store API responses. This will also store the outputted data
+        adp_terminated = []
 
         def make_api_request_active(skip_param):                                                                                                        # Function to make an API request with skip_param and append the response to all_responses
 
@@ -102,6 +109,37 @@ def global_data_calls(access_token,
             else:
                 print(f"Failed to retrieve data from API for skip_param {skip_param}. Status code: {api_response.status_code}")
 
+        def make_api_request_terminated(skip_param):                                                                                                        # Function to make an API request with skip_param and append the response to all_responses
+
+            api_headers = {
+                'Authorization': f'Bearer {access_token}',
+                'Accept':"application/json;masked=false"
+                }
+
+            api_params = {
+                "$filter": "workers/workAssignments/assignmentStatus/statusCode/codeValue eq 'T'",
+                "$top": 100,
+                "$skip": skip_param
+                }
+
+            api_response = requests.get(api_url, cert=(certfile, keyfile), verify=True, headers=api_headers, params=api_params)
+            time.sleep(0.6)
+
+            if api_response.status_code == 200:
+                #checks the response and writes the response to a variable
+                json_data = api_response.json()
+
+                # Append the response to all_responses
+                adp_terminated.append(json_data)
+
+                # Check for a 204 status code and break the loop
+                if api_response.status_code == 204:
+                    return True
+            elif api_response.status_code == 204:
+                return True
+            else:
+                print(f"Failed to retrieve data from API for skip_param {skip_param}. Status code: {api_response.status_code}")
+
         total_records = 0
         skip_param = 0
 
@@ -109,23 +147,49 @@ def global_data_calls(access_token,
             make_api_request_active(skip_param)
             skip_param += 100
             total_records += 100 
-            if total_records >= rounded_total_number:  
+            if total_records >= API_pagination_calls:  
                 break
         
+        total_records = 0
+        skip_param = 0
+
+        while True:
+            make_api_request_terminated(skip_param)
+            skip_param += 100
+            total_records += 100 
+            if total_records >= API_pagination_calls:  
+                break
+
         make_api_request_leave()
         
-        data = adp_responses  
-
         def filter_records(record):
-            return [worker for worker in record['workers'] if worker['workerID']['idValue'] not in strings_to_exclude]                                  # Function to filter out records based on idValue
-        adp_responses = [dict(workers=filter_records(record)) for record in data]
+            return [
+                worker for worker in record['workers']
+                if worker['workerID']['idValue'] not in strings_to_exclude
+            ]
 
-        combined_workers = []
+        # Filter both datasets
+        adp_responses = [dict(workers=filter_records(record)) for record in adp_responses]
+        adp_terminated = [dict(workers=filter_records(record)) for record in adp_terminated]
+
+        # Combine workers separately
+        combined_workers_responses = []
         for item in adp_responses:
-            combined_workers.extend(item["workers"])
+            combined_workers_responses.extend(item["workers"])
 
-        combined_data = [{
-            "workers": combined_workers,
+        combined_workers_terminated = []
+        for item in adp_terminated:
+            combined_workers_terminated.extend(item["workers"])
+
+        # Final separate combined structures
+        combined_data_responses = [{
+            "workers": combined_workers_responses,
+            "meta": None,
+            "confirmMessage": None
+        }]
+
+        combined_data_terminated = [{
+            "workers": combined_workers_terminated,
             "meta": None,
             "confirmMessage": None
         }]
@@ -133,9 +197,12 @@ def global_data_calls(access_token,
         if Data_export:
             file_path = os.path.join(data_store,"002 - Security and Global","001 - ADP (Data Out).json")
             with open(file_path, "w") as outfile:
-                json.dump(combined_data, outfile, indent=4)
+                json.dump(combined_data_responses, outfile, indent=4)
+            file_path = os.path.join(data_store,"002 - Security and Global","001 - ADP (Data Out - Terminations).json")
+            with open(file_path, "w") as outfile:
+                json.dump(combined_data_terminated, outfile, indent=4)
 
-        return combined_data
+        return combined_data_responses,combined_data_terminated
 
     def GET_workers_cascade():
         time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -358,7 +425,7 @@ def global_data_calls(access_token,
 
                         for node in hierarchy_nodes:
                             if node.get("SourceSystemId") == hierarchy:
-                                hierarchy_id = node.get("Id")
+                                hierarchy_id = node.get("Id",None)
 
                         LM_kzo = worker['workAssignments'][active_job_position].get('reportsTo',[{}])[0].get("associateOID")
                         # Find matching display_id (case-insensitive)
@@ -476,14 +543,14 @@ def global_data_calls(access_token,
                 
                 return ID_library
 
-    adp_responses                                                                                           = GET_workers_adp()
+    adp_responses, adp_terminations                                                                         = GET_workers_adp()
     cascade_responses                                                                                       = GET_workers_cascade()
     hierarchy_nodes                                                                                         = GET_hierarchy_nodes()
     ID_library                                                                                              = ID_generator()
 
-    return (adp_responses,cascade_responses,hierarchy_nodes,ID_library)
+    return (adp_responses,adp_terminations,cascade_responses,hierarchy_nodes,ID_library)
 
 if __name__ == "__main__":
-    adp_responses,cascade_responses,hierarchy_nodes,ID_library = global_data_calls()
+    adp_responses,adp_terminations,cascade_responses,hierarchy_nodes,ID_library = global_data_calls()
 
 print()

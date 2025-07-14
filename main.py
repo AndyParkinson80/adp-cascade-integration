@@ -1,9 +1,3 @@
-# Set-ExecutionPolicy Bypass -Scope Process
-# cd "C:\\Users\\andre\OneDrive - acornstairlifts.com\\001 - Data + Systems\\000 - Deployed Programs\\001 - ADP to Cascade Integration (USA and CAN)"
-# gcloud builds submit --tag europe-west2-docker.pkg.dev/api-integrations-412107/integration/integration:latest
-# gcloud run jobs update adp-integrations --image europe-west2-docker.pkg.dev/api-integrations-412107/integration/integration:latest --region europe-west2
-# gcloud run jobs execute adp-integrations --region europe-west2
-
 from datetime import datetime
 import os
 import sys
@@ -12,26 +6,25 @@ from pathlib import Path
 from scripts import securityKeys, globalcalls, cascadeIdtoADP, personal
 from scripts import jobdetails, absences, folder_structure, run_type_choice
 
-debug = True
-
-if debug is True:
-    folder_structure.create_folders()
-else:
-    folder_structure.delete_folders()
+debug = False
 
 run_type = run_type_choice.find_run_type()
-run_type = 2
+#run_type = 3
 
 def country(country,USA,CAN,run_type,debug):
     print ("---------------------------------------------------------------------------------------------------------------")
     print (f"Synchronizing country: {country}")
     
     if debug:
+        folder_structure.create_folders()
         extended_update = False                                          
         Data_export = True
     else:
         extended_update = True                                                            
-        Data_export = False      
+        Data_export = True
+        if Data_export:
+            folder_structure.create_folders()
+
 
     current_folder = Path(__file__).resolve().parent
     if USA:                                                                             
@@ -63,6 +56,7 @@ def country(country,USA,CAN,run_type,debug):
                                                     temp_keyfile)
     
     adp_responses, \
+    adp_terminations, \
     cascade_responses, \
     hierarchy_nodes, \
     ID_library  \
@@ -111,6 +105,7 @@ def country(country,USA,CAN,run_type,debug):
     elif run_type == 3:
         personal.upload_personal_data_to_cascade(   cascade_token,
                                                     adp_responses,
+                                                    adp_terminations,
                                                     cascade_responses,
                                                     USA,
                                                     CAN,
