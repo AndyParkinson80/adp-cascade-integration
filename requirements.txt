@@ -1,12 +1,8 @@
-requests
-datetime
-pandas
-boto3
-pyarrow
-openpyxl
-Jinja2
-pathlib
-google-cloud-secret-manager
-google-cloud-storage
-google-cloud-bigquery
-google_auth_oauthlib
+# Third-party packages
+requests>=2.31.0
+pandas>=2.0.0
+
+# Google Cloud Platform
+google-auth>=2.20.0
+google-cloud-secret-manager>=2.16.0
+google-cloud-storage>=2.10.0
