@@ -158,7 +158,7 @@ def debug_check(debug):
         Data_export = True
     else:
         extended_update = True                                                            
-        Data_export = True
+        Data_export = False
         if Data_export:
             create_folders()
     
@@ -2367,7 +2367,7 @@ if __name__ == "__main__":
     global country,creds,project_Id,storage_client
 
     run_type = find_run_type()
-    run_type = 3                                  #Comment this out in the production version
+    run_type = 4                                  #Comment this out in the production version
 
     creds, project_Id = google_auth()
 
