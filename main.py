@@ -964,7 +964,7 @@ def get_cascade_id(CascadeId):
     
     return Cascade_full,AOID
 
-def get_absences_adp(AOID):                                                                                                                                                 #For the current employee, finds their absences on ADP
+def get_absences_adp(AOID):
 
     api_url = "https://api.adp.com/time/v2/workers/" + AOID + "/time-off-details/time-off-requests"
 
@@ -2367,7 +2367,7 @@ if __name__ == "__main__":
     global country,creds,project_Id,storage_client
 
     run_type = find_run_type()
-    run_type = 4                                  #Comment this out in the production version
+    #run_type = 1                                  #Comment this out in the production version
 
     creds, project_Id = google_auth()
 
@@ -2486,11 +2486,10 @@ if __name__ == "__main__":
             cascade_current_jobs                = cascade_current_workers()
             cascade_current                     = cascade_rejig_jobs(cascade_current_jobs)
             adp_current,new_starters_jobs       = adp_rejig(cascade_current,adp_responses)
-            new_start_jobs                      = adp_rejig_new_starters(new_starters,adp_responses)
+            new_start_jobs                      = adp_rejig_new_starters(new_starters_jobs,adp_responses)
             PUT_jobs, POST_jobs                 = classify_adp_files(new_start_jobs,adp_current,cascade_current)
             PUT_update_job_change(PUT_jobs)
             POST_create_jobs(POST_jobs, new_start_jobs)
-
 
         else:
             print("Run Type not defined correctly. Set Flag correctly")       

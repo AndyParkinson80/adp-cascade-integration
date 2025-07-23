@@ -13,10 +13,10 @@ runGcloud = False
 # Configuration
 PROJECT_ID = os.environ.get("PROJECT_ID")
 REGION = "europe-west2"
-REPO = "imperago-metrics"
-IMAGE_NAME = "daily_audit_v3"
+REPO = "integration"
+IMAGE_NAME = "integration"
 TAG = f"{REGION}-docker.pkg.dev/{PROJECT_ID}/{REPO}/{IMAGE_NAME}:latest"
-JOB_NAME = "daily-audit-v3"
+JOB_NAME = "adp-integrations"
 BUCKET_NAME = f"gcf-artifacts-{PROJECT_ID}"  # Must exist
 SOURCE_TAR = "source.tar.gz"
 

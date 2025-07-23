@@ -1,6 +1,7 @@
 # Third-party packages
 requests>=2.31.0
 pandas>=2.0.0
+openpyxl
 
 # Google Cloud Platform
 google-auth>=2.20.0
