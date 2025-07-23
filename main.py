@@ -157,6 +157,7 @@ def debug_check(debug):
         extended_update = False                                          
         Data_export = True
     else:
+        delete_folders()
         extended_update = True                                                            
         Data_export = False
         if Data_export:
@@ -845,6 +846,7 @@ def whats_in_ADP(adp_responses, ID_library, country):
                 transformed_record = {
                     "AOID": AOID,
                     "Cascade": Cascade
+                    #"Cascade": Cascade if Cascade is not None else ""              #Use this to strip CascadeId's out of Canadian Records
                     }
 
                 ID_responses.append(transformed_record)
@@ -2367,7 +2369,7 @@ if __name__ == "__main__":
     global country,creds,project_Id,storage_client
 
     run_type = find_run_type()
-    #run_type = 1                                  #Comment this out in the production version
+    #run_type = 4                                  #Comment this out in the production version
 
     creds, project_Id = google_auth()
 
