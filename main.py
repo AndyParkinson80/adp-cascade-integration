@@ -29,7 +29,7 @@ from google.cloud import storage
 
 debug = False
 
-base_path = Path(__file__).resolve().parent.parent
+#base_path = Path(__file__).resolve().parent.parent             #Remove if program works 5 times without
 current_folder = Path(__file__).resolve().parent
 
 #----------------------------------------------------------------------------------# Set up
@@ -54,10 +54,10 @@ def find_run_type():
 
     return run_type
 
-def create_folders(base_path=None, structure=None):
-    if base_path is None:
-        base_path = Path(__file__).resolve().parent.parent  # Folder above the script folder
-
+def create_folders(current_folder, structure=None, created_paths=None):
+    if created_paths is None:
+        created_paths = []
+        
     if structure is None:
         structure = {
             "Data Store": {
@@ -80,15 +80,20 @@ def create_folders(base_path=None, structure=None):
 
     for folder_name, subfolders in structure.items():
         # Create the folder
-        folder_path = base_path/ folder_name
+        folder_path = current_folder / folder_name
         os.makedirs(folder_path, exist_ok=True)
+        
+        # Add full path to the list
+        created_paths.append(str(folder_path.resolve()))
 
         # Recursively create subfolders
-        if isinstance(subfolders, dict):
-            create_folders(folder_path, subfolders)
+        if isinstance(subfolders, dict) and subfolders:
+            create_folders(folder_path, subfolders, created_paths)
+    
+    return created_paths
 
 def delete_folders():
-    base_path_delete = base_path / "Data Store"
+    base_path_delete = current_folder / "Data Store"
     folders_to_delete = ["Data - CAN", "Data - USA"]
 
     for folder_name in folders_to_delete:
@@ -153,16 +158,21 @@ def google_auth():
 
 def debug_check(debug):
     if debug:
-        create_folders()
+        folder_paths = create_folders(current_folder)
+        print("Created folders:")
+        for path in folder_paths:
+            print(path)
         extended_update = False                                          
         Data_export = True
     else:
-        delete_folders()
         extended_update = True                                                            
         Data_export = False
         if Data_export:
-            create_folders()
-    
+            folder_paths = create_folders(current_folder)
+            print("Created folders:")
+            #for path in folder_paths:
+            #    print(path)
+        
     return extended_update,Data_export
 
 def data_store_location(country):
@@ -445,7 +455,26 @@ def GET_workers_adp():
     for item in adp_terminated:
         combined_workers_terminated.extend(item["workers"])
 
-    # Final separate combined structures
+    filtered_workers_terminated = []
+    
+    for worker in combined_workers_terminated:
+        try:
+            # Extract termination date from the worker record
+            termination_date_str = worker.get('workerDates', {}).get('terminationDate')
+            
+            if termination_date_str:
+                # Parse the termination date (assuming YYYY-MM-DD format)
+                termination_date = datetime.strptime(termination_date_str, '%Y-%m-%d')
+                
+                # Check if termination date is within the last 6 months
+                if termination_date >= x_months_ago:
+                    filtered_workers_terminated.append(worker)
+                    
+        except (ValueError, KeyError, TypeError) as e:
+            # Skip records with invalid or missing termination dates
+            print(f"Skipping record due to date parsing error: {e}")
+            continue
+    
     combined_data_responses = [{
         "workers": combined_workers_responses,
         "meta": None,
@@ -453,7 +482,7 @@ def GET_workers_adp():
     }]
 
     combined_data_terminated = [{
-        "workers": combined_workers_terminated,
+        "workers": filtered_workers_terminated,
         "meta": None,
         "confirmMessage": None
     }]
@@ -465,7 +494,6 @@ def GET_workers_adp():
         file_path = os.path.join(data_store,"002 - Security and Global","001 - ADP (Data Out - Terminations).json")
         with open(file_path, "w") as outfile:
             json.dump(combined_data_terminated, outfile, indent=4)
-
     return combined_data_responses,combined_data_terminated
 
 def GET_workers_cascade():
@@ -565,6 +593,12 @@ def GET_workers_cascade():
         for record in record_set.get('value', []):
             if record.get('DisplayId') is not None:
                 filtered_data.append(record)
+
+    if Data_export:
+        file_path = os.path.join(data_store,"002 - Security and Global","001 - Cascade Raw Out.json")
+        with open(file_path, "w") as outfile:
+            json.dump(filtered_data, outfile, indent=4)
+    
 
     return filtered_data
 
@@ -957,7 +991,7 @@ def create_absences_reasons():
     
     return absence_reasons
 
-def get_cascade_id(CascadeId):
+def get_cascade_id(CascadeId,ID_library):
     for record in ID_library:
         if record["CascadeId"] == CascadeId:
             Cascade_full = record["Cascade_full"]
@@ -1409,8 +1443,8 @@ def load_csv_from_bucket(name):
             json.dump(result, outfile, indent=4)
 
     return result
-    
-def convert_adp_to_cascade_form(records,suffix,terminations):                         
+
+def convert_adp_to_cascade_form(records,suffix,terminations,ID_library,x_months_ago=None):                         
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Converting the adp data to the cascade form (" + time_now+ ")")
 
@@ -1474,16 +1508,19 @@ def convert_adp_to_cascade_form(records,suffix,terminations):
             if mobileOwner == None:
                 mobileOwner = "Personal"
 
+            contServiceSplit = start_date  # Default value if no record is found
+            Id = None
+
             for entry in ID_library:
                 if entry["ADP_number"] == ADP_id and entry["CascadeId"] is None:
                     contService = entry["contServiceDate"]
+                    contServiceSplit = contService.split("T")[0]
                     Id = None
                 elif entry["CascadeId"] == display_id:
                     contService = entry["contServiceDate"]
-                    Id = entry["Cascade_full"]
+                    contServiceSplit = contService.split("T")[0]
+                    Id = entry["Cascade_full"]   
                     break  # Exit the loop once a match is found
-
-            contServiceSplit = contService.split("T")[0]
 
             employment_start_date = datetime.strptime(start_date, "%Y-%m-%d")
             continuous_service_date = datetime.strptime(contServiceSplit, "%Y-%m-%d")
@@ -1887,7 +1924,7 @@ def cascade_rejig_jobs(cascade_current_jobs):
 
     return filtered_records
 
-def adp_rejig(cascade_current,adp_responses):
+def adp_rejig(cascade_current,adp_responses,ID_library):
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Faffling about with the Jobs info to upload to Cascade (" + time_now + ")")
 
@@ -2069,7 +2106,7 @@ def adp_rejig(cascade_current,adp_responses):
                 
     return transformed_records,new_start_jobs   
 
-def adp_rejig_new_starters(new_starters,adp_responses):
+def adp_rejig_new_starters(new_starters,adp_responses,ID_library):
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Faffling about with the New Staff Jobs info to upload to Cascade (" + time_now + ")")
     new_start = []
@@ -2366,10 +2403,14 @@ def POST_create_jobs(POST_jobs, new_start_jobs):
 #----------------------------------------------------------------------------------# 
 if __name__ == "__main__":
 
+    delete_folders()                                #clears out at the start of every run. Can be recreated if needed
+    time.sleep(1)
     global country,creds,project_Id,storage_client
 
+    extended_update,Data_export = debug_check(debug)
+
     run_type = find_run_type()
-    #run_type = 4                                  #Comment this out in the production version
+    #run_type = 1                                    #Comment this out in the production version
 
     creds, project_Id = google_auth()
 
@@ -2380,11 +2421,10 @@ if __name__ == "__main__":
         print ("---------------------------------------------------------------------------------------------------------------")
         print (f"Synchronizing country: {c}")                                           #c represents country. Either USA or CAN
 
-        global access_token, cascade_token, certfile, keyfile, strings_to_exclude, extended_update
-        global Data_export, data_store,country_hierarchy_USA, country_hierarchy_CAN, ID_library
-        
-        extended_update,Data_export = debug_check(debug)
 
+        global access_token, cascade_token, certfile, keyfile, strings_to_exclude, extended_update
+        global Data_export, data_store,country_hierarchy_USA, country_hierarchy_CAN
+        
         data_store = data_store_location(c)
 
         client_id, client_secret, strings_to_exclude, country_hierarchy_USA, country_hierarchy_CAN, cascade_API_id, keyfile, certfile = load_keys(c)
@@ -2431,7 +2471,7 @@ if __name__ == "__main__":
             for record in ID_list:
                 CascadeId = record["CascadeId"]
                 print(f"Updating absences for {CascadeId}")
-                Cascade_full, AOID = get_cascade_id(CascadeId)            
+                Cascade_full, AOID = get_cascade_id(CascadeId,ID_library)            
                 
                 try:
                     adp_response = get_absences_adp(AOID)                               #Downloads the absences in the last 90 days for a given staff member
@@ -2458,8 +2498,9 @@ if __name__ == "__main__":
                     error_message = f"      Error processing CascadeId {CascadeId} on line {line_number}: {e}"
                     print(error_message)
                     continue
-        #----------     Update Personal Data     ----------#
-        
+       
+       #----------     Update Personal Data     ----------#
+    
         elif run_type == 3:
             time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             print ("    Updating personal details on Cascade (" + time_now + ")")
@@ -2469,8 +2510,8 @@ if __name__ == "__main__":
             elif c == "usa":
                 terminations = load_csv_from_bucket("USA_termination_mapping")
 
-            adp_to_cascade                                              = convert_adp_to_cascade_form(adp_responses,"all",terminations)
-            adp_to_cascade_terminated                                   = convert_adp_to_cascade_form(adp_terminations,"terminated",terminations)
+            adp_to_cascade                                              = convert_adp_to_cascade_form(adp_responses,"all",terminations,ID_library)
+            adp_to_cascade_terminated                                   = convert_adp_to_cascade_form(adp_terminations,"terminated",terminations,ID_library,x_months_ago)
 
             cascade_reordered                                           = cascade_rejig_personal(cascade_responses)
             records_to_upload, new_starters, unterminated_staff         = combine_json_files(adp_to_cascade_terminated,adp_to_cascade,cascade_reordered)
@@ -2481,14 +2522,14 @@ if __name__ == "__main__":
         #----------     Update Job Data     ----------#
         
         elif run_type == 4:
-
+            
             time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             print ("    Updating Job details on Cascade (" + time_now + ")")
             
             cascade_current_jobs                = cascade_current_workers()
             cascade_current                     = cascade_rejig_jobs(cascade_current_jobs)
-            adp_current,new_starters_jobs       = adp_rejig(cascade_current,adp_responses)
-            new_start_jobs                      = adp_rejig_new_starters(new_starters_jobs,adp_responses)
+            adp_current,new_starters_jobs       = adp_rejig(cascade_current,adp_responses,ID_library)
+            new_start_jobs                      = adp_rejig_new_starters(new_starters_jobs,adp_responses,ID_library)
             PUT_jobs, POST_jobs                 = classify_adp_files(new_start_jobs,adp_current,cascade_current)
             PUT_update_job_change(PUT_jobs)
             POST_create_jobs(POST_jobs, new_start_jobs)
@@ -2496,7 +2537,11 @@ if __name__ == "__main__":
         else:
             print("Run Type not defined correctly. Set Flag correctly")       
 
+        ID_library = []
+
+
     countries = ["usa","can"]
+    #countries = [ "can"]           #Use to test Canada independently)
 
     for c in countries:
         country_choice (c,run_type,debug)
