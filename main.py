@@ -29,7 +29,6 @@ from google.cloud import storage
 
 debug = False
 
-#base_path = Path(__file__).resolve().parent.parent             #Remove if program works 5 times without
 current_folder = Path(__file__).resolve().parent
 
 #----------------------------------------------------------------------------------# Set up
