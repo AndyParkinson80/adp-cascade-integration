@@ -27,7 +27,7 @@ from google.oauth2 import service_account
 from google.cloud import secretmanager
 from google.cloud import storage
 
-debug = False
+debug = True
 
 current_folder = Path(__file__).resolve().parent
 
@@ -165,7 +165,7 @@ def debug_check(debug):
         Data_export = True
     else:
         extended_update = True                                                            
-        Data_export = False
+        Data_export = True
         if Data_export:
             folder_paths = create_folders(current_folder)
             print("Created folders:")
@@ -1681,7 +1681,9 @@ def combine_json_files(adp_to_cascade_terminated,adp_to_cascade,cascade_reordere
 
     # New Section: Filter out terminated staff that are still present in cascade_reordered
     #cascade_ids = {entry.get("DisplayId") for entry in cascade_reordered}
-    unterminated_staff = [entry for entry in adp_to_cascade_terminated if entry in cascade_reordered]
+    unterminated_staff = [entry for entry in adp_to_cascade_terminated 
+                            if any(c.get('DisplayId') == entry.get('DisplayId') and c.get('LastWorkingDate') is None 
+                            for c in cascade_reordered)]
     print("             Terminated Staff not in Cascade: " + str(len(unterminated_staff)))
 
     processed_unterminated_records = []
@@ -1701,7 +1703,7 @@ def combine_json_files(adp_to_cascade_terminated,adp_to_cascade,cascade_reordere
             
             processed_unterminated_records.append(updated_record)
             
-            print(f"Updated record for DisplayId {display_id}: new Id = {new_id}")
+            print(f"Updated record for DisplayId {display_id}: Cascade Full Id = {new_id}")
         else:
             print(f"Warning: No DisplayId found in record")
             processed_unterminated_records.append(record)
@@ -2409,14 +2411,14 @@ if __name__ == "__main__":
     extended_update,Data_export = debug_check(debug)
 
     run_type = find_run_type()
-    #run_type = 1                                    #Comment this out in the production version
+    run_type = 3                         #Comment this out in the production version
 
     creds, project_Id = google_auth()
 
     x_months_ago = datetime.now() - timedelta(days=180)
     storage_client = storage.Client(credentials=creds,project=project_Id)
 
-    def country_choice(c,run_type,debug):
+    def country_choice(c,run_type):
         print ("---------------------------------------------------------------------------------------------------------------")
         print (f"Synchronizing country: {c}")                                           #c represents country. Either USA or CAN
 
@@ -2540,10 +2542,10 @@ if __name__ == "__main__":
 
 
     countries = ["usa","can"]
-    #countries = [ "can"]           #Use to test Canada independently)
+    #countries = [ "usa"]           #Use to test Country independently)
 
     for c in countries:
-        country_choice (c,run_type,debug)
+        country_choice (c,run_type)
 
     ct_fin = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ()
