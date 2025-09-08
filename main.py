@@ -27,7 +27,7 @@ from google.oauth2 import service_account
 from google.cloud import secretmanager
 from google.cloud import storage
 
-debug = True
+debug = False
 
 current_folder = Path(__file__).resolve().parent
 
@@ -165,7 +165,7 @@ def debug_check(debug):
         Data_export = True
     else:
         extended_update = True                                                            
-        Data_export = True
+        Data_export = False
         if Data_export:
             folder_paths = create_folders(current_folder)
             print("Created folders:")
@@ -2411,7 +2411,7 @@ if __name__ == "__main__":
     extended_update,Data_export = debug_check(debug)
 
     run_type = find_run_type()
-    run_type = 3                         #Comment this out in the production version
+    #run_type = 1                         #Comment this out in the production version
 
     creds, project_Id = google_auth()
 
