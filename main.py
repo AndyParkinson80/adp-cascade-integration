@@ -27,31 +27,37 @@ from google.oauth2 import service_account
 from google.cloud import secretmanager
 from google.cloud import storage
 
-debug = False
+debug = True
+testing = True
+Data_export = True
 
 current_folder = Path(__file__).resolve().parent
+
+adp_workers = 'https://api.adp.com/hr/v2/workers'
+cascade_workers = 'https://api.iris.co.uk/hr/v2/employees?%24count=true'
 
 #----------------------------------------------------------------------------------# Set up
 
 def find_run_type():
+    
     current_time = datetime.now().time()
 
-    if dt_time(0,0) <= current_time < dt_time(0,10):
-        run_type = 1
-    elif dt_time(0,30) <= current_time < dt_time(0,40):
-        run_type = 2
-    elif dt_time(1,0) <= current_time < dt_time(1,10):
-        run_type = 3
-    elif dt_time(3,0) <= current_time < dt_time(3,10):
-        run_type = 1
-    elif dt_time(3,30) <= current_time < dt_time(3,40):
-        run_type = 4    
-    elif dt_time(4,0) <= current_time < dt_time(4,10):
-        run_type = 5
-    else:
-        run_type = 1
+    time_ranges = [
+        (dt_time(0, 0), dt_time(0, 10), 1),    # Push New Cascade Id's back to Cascade
+        (dt_time(0, 30), dt_time(0, 40), 2),   # Delete removed Absences
+        (dt_time(1, 0), dt_time(1, 10), 3),    # Updates staff personal and adds new staff
+        (dt_time(3, 0), dt_time(3, 10), 1),    # Push New Cascade Id's back to Cascade (Pushes ID for new Staff)
+        (dt_time(3, 30), dt_time(3, 40), 4),   # Updates job details
+        (dt_time(4, 0), dt_time(4, 10), 5),    # Adds in new and changed Absences
+    ]
 
-    return run_type
+    # Find matching time range
+    for start_time, end_time, run_type in time_ranges:
+        if start_time <= current_time < end_time:
+            return run_type
+    
+    # Default run type if no time range matches
+    return 1
 
 def create_folders(current_folder, structure=None, created_paths=None):
     if created_paths is None:
@@ -103,6 +109,21 @@ def delete_folders():
         if os.path.exists(folder_path):
             shutil.rmtree(folder_path)
 
+def export_data(folder, filename, variable):
+    file_path = Path(data_store) / folder / filename
+    with open(file_path, "w") as outfile:
+        json.dump(variable, outfile, indent=4)
+
+def import_data(folder,filename):
+    file_path = Path(data_store) / folder / filename
+    with open(file_path, "r") as file:
+        return json.load(file)
+
+def load(folder,filename,variable_name):
+    file_path = Path(data_store) / folder / filename
+    with open(file_path,"r") as file:
+        globals()[variable_name] = json.load(file)
+
 def google_auth():
     """
     Authenticate with Google Cloud and return credentials and project ID.
@@ -130,28 +151,14 @@ def google_auth():
         if not secret_json:
             raise Exception("GOOGLE_CLOUD_SECRET environment variable not found")
         
-        try:
-            # Parse the JSON credentials
-            service_account_info = json.loads(secret_json)
+        service_account_info = json.loads(secret_json)
+        
+        credentials = service_account.Credentials.from_service_account_info(service_account_info)
+        project_id = service_account_info.get('project_id')
+        
+        print("Successfully authenticated using service account credentials")
+        return credentials, project_id
             
-            # Create credentials from service account info
-            credentials = service_account.Credentials.from_service_account_info(
-                service_account_info
-            )
-            
-            # Extract project ID from service account info
-            project_id = service_account_info.get('project_id')
-            if not project_id:
-                raise Exception("project_id not found in service account credentials")
-            
-            print("Successfully authenticated using service account credentials")
-            return credentials, project_id
-            
-        except json.JSONDecodeError:
-            raise Exception("Invalid JSON in GOOGLE_CLOUD_SECRET environment variable")
-        except Exception as e:
-            raise Exception(f"Failed to create service account credentials: {str(e)}")
-    
     except Exception as e:
         raise Exception(f"Authentication failed: {str(e)}")
 
@@ -159,13 +166,13 @@ def debug_check(debug):
     if debug:
         folder_paths = create_folders(current_folder)
         print("Created folders:")
-        for path in folder_paths:
-            print(path)
+        #for path in folder_paths:
+        #    print(path)
         extended_update = False                                          
         Data_export = True
     else:
         extended_update = True                                                            
-        Data_export = False
+        Data_export = True
         if Data_export:
             folder_paths = create_folders(current_folder)
             print("Created folders:")
@@ -175,47 +182,44 @@ def debug_check(debug):
     return extended_update,Data_export
 
 def data_store_location(country):
-    if country == "usa":                                                                             
-        data_store = os.path.join(current_folder,"Data Store","Data - USA")
-        return data_store
-    else:
-        data_store = os.path.join(current_folder,"Data Store","Data - CAN")
-        return data_store
-    
+    folder_name = f"Data - {country.upper()}"
+    return os.path.join(current_folder, "Data Store", folder_name)
+
+def get_secret(secret_id, version_id="latest"):
+    client = secretmanager.SecretManagerServiceClient(credentials=creds)
+    name = f"projects/{project_Id}/secrets/{secret_id}/versions/{version_id}"
+    response = client.access_secret_version(request={"name": name})
+    return response.payload.data.decode("UTF-8")
+
 def load_keys(country):
-        time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print ("    Gathering Security Information (" + time_now + ")")                                                                    #loads keys from secure external file
-        time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print ("        Loading Security Keys (" + time_now + ")")
-        
-        def get_secrets(secret_id):
-            def access_secret_version(project_Id, secret_id, version_id="latest"):
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"    Gathering Security Information ({now_str})")
+    print(f"        Loading Security Keys ({now_str})")
 
-                client = secretmanager.SecretManagerServiceClient(credentials=creds)
-                name = f"projects/{project_Id}/secrets/{secret_id}/versions/{version_id}"
+    # Secrets to load
+    secret_ids = {
+        "client_id": f"ADP-{country}-client-id",
+        "client_secret": f"ADP-{country}-client-secret",
+        "country_hierarchy_USA": "country_Hierarchy_USA",
+        "country_hierarchy_CAN": "country_Hierarchy_CAN",
+        "strings_to_exclude": "strings_to_exclude",
+        "cascade_API_id": "cascade_API_id",
+        "keyfile": f"{country}_cert_key",
+        "certfile": f"{country}_cert_pem",
+    }
 
-                response = client.access_secret_version(request={"name": name})
-                payload = response.payload.data.decode("UTF-8")
+    secrets = {k: get_secret(v) for k, v in secret_ids.items()}
 
-                return payload
-
-            version_id = "latest" 
-
-            secret = access_secret_version(project_Id, secret_id, version_id)
-            #print(f"Secret value: {secret}")
-
-            return secret
-
-        client_id = get_secrets(f"ADP-{country}-client-id")
-        client_secret = get_secrets(f"ADP-{country}-client-secret")
-        country_hierarchy_USA = get_secrets(f"country_Hierarchy_USA")
-        country_hierarchy_CAN = get_secrets("country_Hierarchy_CAN")
-        strings_to_exclude = get_secrets("strings_to_exclude")
-        cascade_API_id = get_secrets("cascade_API_id")
-        keyfile = get_secrets(f"{country}_cert_key")
-        certfile = get_secrets(f"{country}_cert_pem")
-        
-        return client_id,client_secret,strings_to_exclude,country_hierarchy_USA,country_hierarchy_CAN,cascade_API_id,keyfile,certfile
+    return (
+        secrets["client_id"],
+        secrets["client_secret"],
+        secrets["strings_to_exclude"],
+        secrets["country_hierarchy_USA"],
+        secrets["country_hierarchy_CAN"],
+        secrets["cascade_API_id"],
+        secrets["keyfile"],
+        secrets["certfile"],
+    )
 
 def load_ssl(certfile_content, keyfile_content):
     """
@@ -239,393 +243,190 @@ def load_ssl(certfile_content, keyfile_content):
         temp_certfile.close()
         temp_keyfile.close()
 
-        # Return the paths of the temporary files
         return temp_certfile.name, temp_keyfile.name
+    
     except Exception as e:
         # Clean up in case of error
         os.unlink(temp_certfile.name)
         os.unlink(temp_keyfile.name)
         raise e
 
-def security(client_id, client_secret, cascade_API_id,temp_certfile,temp_keyfile):
-        time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print ("        Creating Credentials (" + time_now + ")")
-        
-        certfile = temp_certfile
-        keyfile = temp_keyfile
+def adp_bearer(client_id,client_secret,certfile,keyfile):
+    adp_token_url = 'https://accounts.adp.com/auth/oauth/v2/token'                                                                                          
 
-        def adp_bearer():
-            adp_token_url = 'https://accounts.adp.com/auth/oauth/v2/token'                                                                                          
+    adp_token_data = {
+        'grant_type': 'client_credentials',
+        'client_id': client_id,
+        'client_secret': client_secret
+    }
+    adp_headers = {
+        'Content-Type': 'application/x-www-form-urlencoded',
+    }
+    adp_token_response = requests.post(adp_token_url, cert=(certfile, keyfile), verify=True, data=adp_token_data, headers=adp_headers)
 
-            adp_token_data = {
-                'grant_type': 'client_credentials',
-                'client_id': client_id,
-                'client_secret': client_secret
-            }
-            adp_headers = {
-                'Content-Type': 'application/x-www-form-urlencoded',
-            }
-            adp_token_response = requests.post(adp_token_url, cert=(certfile, keyfile), verify=True, data=adp_token_data, headers=adp_headers)
+    if adp_token_response.status_code == 200:
+        access_token = adp_token_response.json()['access_token']
 
-            if adp_token_response.status_code == 200:
-                access_token = adp_token_response.json()['access_token']
+    return access_token
 
-            return access_token
-
-        def cascade_bearer ():
-            cascade_token_url='https://api.iris.co.uk/oauth2/v1/token'
-            
-            cascade_token_data = {
-                'grant_type':'client_credentials',
-                            }
-            cascade_headers = {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                "Authorization": f'Basic:{cascade_API_id}'
+def cascade_bearer (cascade_API_id):
+    cascade_token_url='https://api.iris.co.uk/oauth2/v1/token'
+    
+    cascade_token_data = {
+        'grant_type':'client_credentials',
                     }
+    cascade_headers = {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        "Authorization": f'Basic:{cascade_API_id}'
+            }
 
-            cascade_token_response = requests.post(cascade_token_url, data=cascade_token_data, headers=cascade_headers)
+    cascade_token_response = requests.post(cascade_token_url, data=cascade_token_data, headers=cascade_headers)
 
-            #checks the api response and extracts the bearer token
-            if cascade_token_response.status_code == 200:
-                cascade_token = cascade_token_response.json()['access_token']
-            
-            return cascade_token
-        
-        access_token = adp_bearer()
-        cascade_token = cascade_bearer()
+    #checks the api response and extracts the bearer token
+    if cascade_token_response.status_code == 200:
+        cascade_token = cascade_token_response.json()['access_token']
+    
+    return cascade_token
 
-        return keyfile,certfile,access_token,cascade_token
+#----------------------------------------------------------------------------------# API Calls
+
+def api_count_adp(page_size,url,headers,type):
+
+    api_count_params = {
+            "$filter": f"workers/workAssignments/assignmentStatus/statusCode/codeValue eq '{type}'",
+            "count": "true",
+        }
+    
+    api_count_response = requests.get(url, cert=(certfile, keyfile), verify=True, headers=headers, params=api_count_params) 
+    response_data = api_count_response.json()
+    total_number = response_data.get("meta", {}).get("totalNumber", 0)
+    api_calls = math.ceil(total_number / page_size)
+
+    return api_calls
+
+def api_call(page_size,skip_param,api_url,api_headers,type):
+    
+    api_params = {
+    "$filter": f"workers/workAssignments/assignmentStatus/statusCode/codeValue eq '{type}'",
+    "$top": page_size,
+    "$skip": skip_param
+    }
+
+    api_response = requests.get(api_url, headers = api_headers, params = api_params)
+    time.sleep(0.6)   
+   
+    return api_response    
+
+def api_count_cascade(api_response,page_size):
+    response_data = api_response.json()
+    total_number = response_data['@odata.count']
+    api_calls = math.ceil(total_number / page_size)
+    
+    return api_calls
+
+def api_call_cascade(api_url,api_headers,api_params=None):
+    api_response = requests.get(api_url, headers = api_headers, params = api_params)
+    time.sleep(0.6)   
+   
+    return api_response
 
 #----------------------------------------------------------------------------------# Global Data Calls
 
+def status_type(status):
+    status_map = {
+        "active": "A",
+        "terminated": "T",
+        "leave": "L"
+    }
+    return status_map.get(status)
+
 def GET_workers_adp():
-    api_url = 'https://api.adp.com/hr/v2/workers'
-
-    def max_staff_rounded_up_to_100():
-        time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print ("        Retrieving Data from ADP Workforce Now (" + time_now + ")")
-        api_headers = {
-                'Authorization': f'Bearer {access_token}',
-                'Accept':"application/json;masked=false",  
-            }
-        api_count_params = {
-                "count": "true",
-            }
-
-        api_count_response = requests.get(api_url, cert=(certfile, keyfile), verify=True, headers=api_headers, params=api_count_params)                 #data request. Find number of records and uses this to find the pages needed
-        response_data = api_count_response.json()
-        total_number = response_data.get("meta", {}).get("totalNumber", 0)
-        rounded_total_number = math.ceil(total_number / 100) * 100
-        return rounded_total_number
-    
-    API_pagination_calls = max_staff_rounded_up_to_100()
-
-    adp_responses = []                                                                                                                              # Initialize an empty list to store API responses. This will also store the outputted data
-    adp_terminated = []
-
-    def make_api_request_active(skip_param):                                                                                                        # Function to make an API request with skip_param and append the response to all_responses
-
+    for status in ["active","leave","terminated"]:
+        print (f"       Downloading ADP Staff with the status - {status}")
+        
+        global adp_active,adp_terminated,adp_leave
+        adp_active = []
+        adp_terminated = []
+        adp_leave = []
+        
+        type = status_type (status)
+        
+        page_size = 100
+        
         api_headers = {
             'Authorization': f'Bearer {access_token}',
             'Accept':"application/json;masked=false"
             }
+        
+        api_calls = api_count_adp(page_size,adp_workers,api_headers,type)
 
-        api_params = {
-            "$filter": "workers/workAssignments/assignmentStatus/statusCode/codeValue eq 'A'",
-            "$top": 100,
-            "$skip": skip_param
-            }
+        for i in range(api_calls):      
+            skip_param = i * page_size
 
-        api_response = requests.get(api_url, cert=(certfile, keyfile), verify=True, headers=api_headers, params=api_params)
-        time.sleep(0.6)
+            api_response = api_call(page_size,skip_param,adp_workers,api_headers,type)
 
-        if api_response.status_code == 200:
-            #checks the response and writes the response to a variable
-            json_data = api_response.json()
-
-            # Append the response to all_responses
-            adp_responses.append(json_data)
-
-            # Check for a 204 status code and break the loop
-            if api_response.status_code == 204:
-                return True
-        elif api_response.status_code == 204:
-            return True
-        else:
-            print(f"Failed to retrieve data from API for skip_param {skip_param}. Status code: {api_response.status_code}")
-
-    def make_api_request_leave():
-        api_headers = {
-            'Authorization': f'Bearer {access_token}',
-            'Accept':"application/json;masked=false"
-            }
-
-        api_params = {
-            "$filter": "workers/workAssignments/assignmentStatus/statusCode/codeValue eq 'L'",
-            }
-
-        api_response = requests.get(api_url, cert=(certfile, keyfile), verify=True, headers=api_headers, params=api_params)
-        time.sleep(0.6)
-
-        if api_response.status_code == 200:
-            #checks the response and writes the response to a variable
-            json_data = api_response.json()
-
-            # Append the response to all_responses
-            adp_responses.append(json_data)
-
-            # Check for a 204 status code and break the loop
-            if api_response.status_code == 204:
-                return True
-        elif api_response.status_code == 204:
-            return True
-        else:
-            print(f"Failed to retrieve data from API for skip_param {skip_param}. Status code: {api_response.status_code}")
-
-    def make_api_request_terminated(skip_param):                                                                                                        # Function to make an API request with skip_param and append the response to all_responses
-
-        api_headers = {
-            'Authorization': f'Bearer {access_token}',
-            'Accept':"application/json;masked=false"
-            }
-
-        api_params = {
-            "$filter": "workers/workAssignments/assignmentStatus/statusCode/codeValue eq 'T'",
-            "$top": 100,
-            "$skip": skip_param
-            }
-
-        api_response = requests.get(api_url, cert=(certfile, keyfile), verify=True, headers=api_headers, params=api_params)
-        time.sleep(0.6)
-
-        if api_response.status_code == 200:
-            #checks the response and writes the response to a variable
-            json_data = api_response.json()
-
-            # Append the response to all_responses
-            adp_terminated.append(json_data)
-
-            # Check for a 204 status code and break the loop
-            if api_response.status_code == 204:
-                return True
-        elif api_response.status_code == 204:
-            return True
-        else:
-            print(f"Failed to retrieve data from API for skip_param {skip_param}. Status code: {api_response.status_code}")
-
-    total_records = 0
-    skip_param = 0
-
-    while True:
-        make_api_request_active(skip_param)
-        skip_param += 100
-        total_records += 100 
-        if total_records >= API_pagination_calls:  
-            break
-    
-    total_records = 0
-    skip_param = 0
-
-    while True:
-        make_api_request_terminated(skip_param)
-        skip_param += 100
-        total_records += 100 
-        if total_records >= API_pagination_calls:  
-            break
-
-    make_api_request_leave()
-    
-    def filter_records(record):
-        return [
-            worker for worker in record['workers']
-            if worker['workerID']['idValue'] not in strings_to_exclude
-        ]
-
-    # Filter both datasets
-    adp_responses = [dict(workers=filter_records(record)) for record in adp_responses]
-    adp_terminated = [dict(workers=filter_records(record)) for record in adp_terminated]
-
-    # Combine workers separately
-    combined_workers_responses = []
-    for item in adp_responses:
-        combined_workers_responses.extend(item["workers"])
-
-    combined_workers_terminated = []
-    for item in adp_terminated:
-        combined_workers_terminated.extend(item["workers"])
-
-    filtered_workers_terminated = []
-    
-    for worker in combined_workers_terminated:
-        try:
-            # Extract termination date from the worker record
-            termination_date_str = worker.get('workerDates', {}).get('terminationDate')
-            
-            if termination_date_str:
-                # Parse the termination date (assuming YYYY-MM-DD format)
-                termination_date = datetime.strptime(termination_date_str, '%Y-%m-%d')
+            if api_response.status_code == 200:
+                json_data = api_response.json()
+                json_data = json_data['workers']
+           
+                filtered_data = [
+                    worker for worker in json_data 
+                    if worker.get('workerID', {}).get('idValue') not in strings_to_exclude
+                ]
                 
-                # Check if termination date is within the last 6 months
-                if termination_date >= x_months_ago:
-                    filtered_workers_terminated.append(worker)
-                    
-        except (ValueError, KeyError, TypeError) as e:
-            # Skip records with invalid or missing termination dates
-            print(f"Skipping record due to date parsing error: {e}")
-            continue
-    
-    combined_data_responses = [{
-        "workers": combined_workers_responses,
-        "meta": None,
-        "confirmMessage": None
-    }]
+                globals()[f"adp_{status}"].extend(filtered_data)
 
-    combined_data_terminated = [{
-        "workers": filtered_workers_terminated,
-        "meta": None,
-        "confirmMessage": None
-    }]
+        if Data_export:
+            export_data("002 - Security and Global", f"001 - ADP (Data Out - {status}).json", globals()[f"adp_{status}"])    
 
-    if Data_export:
-        file_path = os.path.join(data_store,"002 - Security and Global","001 - ADP (Data Out).json")
-        with open(file_path, "w") as outfile:
-            json.dump(combined_data_responses, outfile, indent=4)
-        file_path = os.path.join(data_store,"002 - Security and Global","001 - ADP (Data Out - Terminations).json")
-        with open(file_path, "w") as outfile:
-            json.dump(combined_data_terminated, outfile, indent=4)
-    return combined_data_responses,combined_data_terminated
+    return adp_active, adp_terminated, adp_leave
 
 def GET_workers_cascade():
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print ("        Retrieving current Personal Data from Cascade HR (" + time_now + ")")
+    print ("    Retrieving current Personal Data from Cascade HR (" + time_now + ")")
+    global cascade_responses
 
-    cascade_responses_initial = []
+    cascade_responses = []
 
-    def api_count():
-        api_url = 'https://api.iris.co.uk/hr/v2/employees?%24count=true'
-        api_headers = {
-            'Authorization': f'Bearer {cascade_token}',
-        }
-        if extended_update == True:                         
+    page_size = 200
+
+    api_headers = {
+        'Authorization': f'Bearer {cascade_token}',
+    }   
+
+    api_response = api_call_cascade(cascade_workers,api_headers,None)
+    api_calls = api_count_cascade(api_response,page_size)                
+
+    for i in range(api_calls):
+            skip_param = i * page_size
             api_params = {
-            }
-        else:
-            api_params = {
-                "$filter": "EmploymentLeftDate eq null",
+                "$top": page_size,
+                "$skip": skip_param
             } 
-        
-        api_count_response = requests.get(api_url, headers=api_headers, params=api_params)
-        response_data = api_count_response.json()
+            
+            api_response = api_call_cascade(cascade_workers,api_headers,api_params)
 
-        total_number = response_data['@odata.count']
-        rounded_total_number = math.ceil(total_number / 200) * 200
-        return rounded_total_number
-    
-    def make_api_request(skip_param):
-        api_url = 'https://api.iris.co.uk/hr/v2/employees?%24count=true'
-        api_headers = {
-            'Authorization': f'Bearer {cascade_token}',
-        }
-        
-        if extended_update == True:                         
-            api_params = {
-                "$top": 200,
-                "$skip": skip_param
-            }
-        else:
-            api_params = {
-                "$filter": "EmploymentLeftDate eq null",
-                "$top": 200,
-                "$skip": skip_param
-            }                
-
-        api_response = requests.get(api_url, headers=api_headers, params=api_params)
-        time.sleep(0.6)
-        if api_response.status_code == 200:
-            #checks the response and writes the response to a variable
-            json_data = api_response.json()
-
-            # Append the response to all_responses
-            cascade_responses_initial.append(json_data)
-
-            # Check for a 204 status code and break the loop
-            if api_response.status_code == 204:
-                return True
-        elif api_response.status_code == 204:
-            return True
-        else:
-            print(f"Failed to retrieve data from API for skip_param {skip_param}. Status code: {api_response.status_code}")
-
-    max_records = api_count()
-
-    total_records = 0
-    skip_param = 0
-
-    while True:
-        make_api_request(skip_param)
-        #maximum returned records for WFN is 100. This small loop alters the $skip variable and requests the 'next' 100
-        # Increment skip_param by 100 for the next request
-        skip_param += 200
-        total_records += 200  # Keep track of the total number of records retrieved
-        
-        # Break the loop when there are no more records to retrieve
-        if total_records >= max_records:  
-            break
-
-        time.sleep(0.6)
-
-    # Combine all the "workers" arrays into a single array
-    combined_value = []
-    for item in cascade_responses_initial:
-        combined_value.extend(item["value"])
-
-    # Create a new dictionary with the combined workers
-    combined_data = [{
-        "value": combined_value,
-        "meta": None,
-        "confirmMessage": None
-    }]
-
-    filtered_data = []
-
-    for record_set in combined_data:
-        for record in record_set.get('value', []):
-            if record.get('DisplayId') is not None:
-                filtered_data.append(record)
+            if api_response.status_code == 200:
+                json_data = api_response.json()
+                json_data = json_data['value']
+                cascade_responses.extend(json_data)    
 
     if Data_export:
-        file_path = os.path.join(data_store,"002 - Security and Global","001 - Cascade Raw Out.json")
-        with open(file_path, "w") as outfile:
-            json.dump(filtered_data, outfile, indent=4)
-    
+        export_data("002 - Security and Global", "001 - Cascade Raw Out.json", cascade_responses)    
 
-    return filtered_data
+    return cascade_responses
 
-def GET_hierarchy_nodes(country):
-    time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print ("        Retrieving Job Hierarchy Nodes (" + time_now + ")")
-
-    if country == "usa":
-        H_top_level = country_hierarchy_USA
-    elif country == "can":
-        H_top_level = country_hierarchy_CAN
-
-    api_url = 'https://api.iris.co.uk/hr/v2/hierarchy'
-    api_headers =   {
-        'Authorization': f'Bearer {cascade_token}'
-                    }
-    
-    def get_hierarchy_nodes(hierarchy_ids):
+def get_hierarchy_nodes(hierarchy_ids,url,headers):
         hierarchy_nodes = []
         hierarchy_id_nodes = []
 
         for h_id in hierarchy_ids:
-            api_params = {
+            params = {
                 "$filter": f"parentId eq '{h_id}' and disabled eq false"
             }
 
             for attempt in range(2):  # Attempt up to 2 times
-                response = requests.get(api_url, params=api_params, headers=api_headers)
+                response = requests.get(url, params=params, headers=headers)
                 time.sleep(0.6)  # Always sleep between requests
 
                 if response.status_code == 200:
@@ -635,12 +436,24 @@ def GET_hierarchy_nodes(country):
                         hierarchy_id_nodes.append(record['Id'])
                     break  # Exit retry loop on success
                 elif attempt == 0:
-                    print(f"Request failed for parentId {h_id}, retrying in 1 second...")
+                    print(f"            Request failed for parentId {h_id}, retrying in 1 second...")
                     time.sleep(3)
                 else:
-                    print(f"Failed to retrieve data for parentId {h_id}: {response.status_code}")
+                    print(f"            Failed to retrieve data for parentId {h_id}: {response.status_code}")
 
         return hierarchy_nodes, hierarchy_id_nodes
+    
+def GET_hierarchy_list(country): 
+    time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print ("    Retrieving Job Hierarchy Nodes (" + time_now + ")")
+
+    H_top_level = globals()[f"country_hierarchy_{country.upper()}"]
+    
+    api_url = 'https://api.iris.co.uk/hr/v2/hierarchy'
+    api_headers =   {
+        'Authorization': f'Bearer {cascade_token}'
+                    }
+    
     # Initial call to get top-level nodes
     initial_params = {
         "$filter": f"Id eq '{H_top_level}'"
@@ -659,236 +472,195 @@ def GET_hierarchy_nodes(country):
 
         # Recursive call to get all descendant nodes
         while hierarchy_id_nodes:
-            new_nodes, new_id_nodes = get_hierarchy_nodes(hierarchy_id_nodes)
+            new_nodes, new_id_nodes = get_hierarchy_nodes(hierarchy_id_nodes,api_url,api_headers)
             hierarchy_nodes.extend(new_nodes)
             hierarchy_id_nodes = new_id_nodes
     else:
         print(f"Failed to retrieve data: {response.status_code}")
 
     if Data_export:
-        file_path = os.path.join(data_store,"002 - Security and Global","002 - Hierarchy Nodes.json")
-        with open(file_path, "w") as outfile:
-            json.dump(hierarchy_nodes, outfile, indent=4)
+        export_data("002 - Security and Global","002 - Hierarchy Nodes.json", hierarchy_nodes)    
+            
     
     return hierarchy_nodes
 
-def ID_generator(country,adp_responses,cascade_responses,hierarchy_nodes):
+def find_active_job_position(worker):
+    active_job_position = None
 
+    work_assignments = worker.get("workAssignments", [{}])
+    for index, assignment in enumerate(work_assignments):
+        if assignment.get("primaryIndicator", True):
+            active_job_position = index
+            continue
+    return active_job_position
+
+def find_cascade_id_and_cont_service(ADP_identifier):
+    for entry in cascade_responses:
+        # Safely get the NationalInsuranceNumber or skip if missing
+        if entry.get("NationalInsuranceNumber") == ADP_identifier:
+            CascadeID = entry.get("DisplayId")
+
+            if CascadeID is None:
+                Cascade_full = None
+            else:
+                Cascade_full = entry.get("Id")
+                contServiceCascade = entry.get("ContinuousServiceDate")
+            break  # Exit loop once a match is found
+    return CascadeID,Cascade_full,contServiceCascade
+
+def ID_generator(country,adp_responses,hierarchy_nodes):
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print ("        Creating an ID library (" + time_now + ")")
+    print ("    Creating an ID library (" + time_now + ")")
 
     ID_library = []
+    file_path = os.path.join(current_folder,"Hierarchy.xlsx")
+    df = pd.read_excel(file_path, sheet_name=f"{country} Conversion")
+    hierarchy_library = df.where(pd.notna(df), None).to_dict(orient = 'records')
+    
+    if Data_export:
+        export_data("002 - Security and Global",f"002 - {country} Hierarchy.json", hierarchy_library)    
 
-    for record in adp_responses:
-        workers = record["workers"]
-        for worker in workers:
+    for worker in adp_responses:
+        active_job_position = find_active_job_position(worker)
 
-            active_job_position = None
-
-            work_assignments = worker.get("workAssignments", [{}])
-            for index, assignment in enumerate(work_assignments):
-                if assignment.get("primaryIndicator", True):
-                    active_job_position = index
-                    continue
-
-            id_value = worker["associateOID"]
-            contServiceADP = worker["workAssignments"][0]["hireDate"]
-            date_obj = datetime.strptime(contServiceADP, "%Y-%m-%d")
-            formatted_date = date_obj.strftime("%Y-%m-%dT00:00:00Z")
+        id_value = worker["associateOID"]
+        contServiceADP = worker["workAssignments"][0]["hireDate"]
+        date_obj = datetime.strptime(contServiceADP, "%Y-%m-%d")
+        formatted_date = date_obj.strftime("%Y-%m-%dT00:00:00Z")
+        ADP_identifier = worker["workAssignments"][active_job_position]["positionID"]
+        LM_kzo = worker['workAssignments'][active_job_position].get('reportsTo',[{}])[0].get("associateOID")
 
 
-            ADP_identifier = worker["workAssignments"][active_job_position]["positionID"]
+        if country == "usa":
+            job_code = worker["workAssignments"][active_job_position]["homeOrganizationalUnits"][1]["nameCode"]["codeValue"]
+            job_name = ""
 
-            if country == "usa":
-                job_code = worker["workAssignments"][active_job_position]["homeOrganizationalUnits"][1]["nameCode"]["codeValue"]
-                file_path = os.path.join(current_folder,"Hierarchy.xlsx")
-                df = pd.read_excel(file_path,sheet_name="usa Conversion")
+            for item in H1:
+                item["ADP Code"] = str(item["ADP Code"])
+                item["Cascade Code"] = str(item["Cascade Code"])
+
+            hierarchy = None
+            for item in hierarchy_library:
+                if item["ADP Code"] == job_code:
+                    hierarchy = item["Cascade Code"]
+                    break
+
+            for node in hierarchy_nodes:
+                if node.get("SourceSystemId") == hierarchy:
+                    hierarchy_id = node.get("Id",None)
+
+            CascadeID = None
+            CascadeID,Cascade_full,contServiceCascade = find_cascade_id_and_cont_service(ADP_identifier)
+
+            if CascadeID is None:
+                date = formatted_date
+                contServiceCascade = None
+            else:
+                date = min(contServiceCascade,formatted_date)
+
+        elif country == "can":
+            job_code = worker["workAssignments"][active_job_position]["homeOrganizationalUnits"][0]["nameCode"]["codeValue"]
+            job_name = worker["workAssignments"][active_job_position]["jobTitle"]
             
-                H1 = df.where(pd.notna(df), None).to_dict(orient='records')
-                for item in H1:
-                    item["ADP Code"] = str(item["ADP Code"])
-                    item["Cascade Code"] = str(item["Cascade Code"])
+            df_1 = df.dropna()
 
-                if Data_export:
-                    file_path = os.path.join(data_store,"002 - Security and Global","002 - USA Hierarchy.json")
-                    with open(file_path, "w") as outfile:
-                        json.dump(H1, outfile, indent=4)
-                
-                hierarchy = None
-                if hierarchy is None:
-                    for item in H1:
-                        if item["ADP Code"] == job_code:
-                            hierarchy = item["Cascade Code"]
-                            break
+            df_2 = df[df.isna().any(axis=1)]
+            df_2 = df_2.drop(columns=['job_name'])
 
-                for node in hierarchy_nodes:
-                    if node.get("SourceSystemId") == hierarchy:
-                        hierarchy_id = node.get("Id",None)
-
-                LM_kzo = worker['workAssignments'][active_job_position].get('reportsTo',[{}])[0].get("associateOID")
-                # Find matching display_id (case-insensitive)
-                CascadeID = None
-
-                for entry in cascade_responses:
-                    # Safely get the NationalInsuranceNumber or skip if missing
-                    if entry.get("NationalInsuranceNumber") == ADP_identifier:
-                        CascadeID = entry.get("DisplayId")
-
-                        if CascadeID is None:
-                            Cascade_full = None
-                        else:
-                            Cascade_full = entry.get("Id")
-                            contServiceCascade = entry.get("ContinuousServiceDate")
-                        break  # Exit loop once a match is found
-
-                if CascadeID is None:
-                    date = formatted_date
-                    contServiceCascade = None
-                else:
-                    date = min(contServiceCascade,formatted_date)
-
-                # Create a dictionary for the transformed data
-                transformed_record = {
-                    "AOID": id_value,
-                    "CascadeId": CascadeID if CascadeID is not None else None,
-                    "Cascade_full": Cascade_full if CascadeID is not None else None, 
-                    "ADP_number": ADP_identifier,
-                    "ADP_line_manager": LM_kzo,
-                    "Job_position": active_job_position,
-                    "Hierarchy": hierarchy_id,
-                    "Cascade Start": contServiceCascade,
-                    "ADP Start": formatted_date,
-                    "contServiceDate": date,
-                }
-                ID_library.append(transformed_record)
-
-            elif country == "can":
-                job_code = worker["workAssignments"][active_job_position]["homeOrganizationalUnits"][0]["nameCode"]["codeValue"]
-                job_name = worker["workAssignments"][active_job_position]["jobTitle"]
-                file_path = os.path.join(current_folder,"Hierarchy.xlsx")
-                df = pd.read_excel(file_path,sheet_name="can Conversion")
-                
-                df_1 = df.dropna()
-
-                df_2 = df[df.isna().any(axis=1)]
-                df_2 = df_2.drop(columns=['job_name'])
-
-                H1 = df_1.where(pd.notna(df_1), None).to_dict(orient='records')
-                for item in H1:
-                    item["job_code"] = str(item["job_code"])
-                    item["hierarchy"] = str(item["hierarchy"])
-            
-                H2 = df_2.where(pd.notna(df_2), None).to_dict(orient='records')
-                for item in H2:
-                    item["job_code"] = str(item["job_code"])
-                    item["hierarchy"] = str(item["hierarchy"])
-
-                if Data_export:
-                    file_path = os.path.join(data_store,"002 - Security and Global","002 - Can Hierarchy (both).json")
-                    with open(file_path, "w") as outfile:
-                        json.dump(H1, outfile, indent=4)
-                    file_path = os.path.join(data_store,"002 - Security and Global","002 - Can Hierarchy (single).json")
-                    with open(file_path, "w") as outfile:
-                        json.dump(H2, outfile, indent=4)
-                
-                hierarchy = None
-                for item in H1:
-                    if item["job_code"] == job_code and item["job_name"] in job_name:
-                        hierarchy = item["hierarchy"]
-                        break
-                if hierarchy is None:
-                    for item in H2:
-                        if item["job_code"] == job_code:
-                            hierarchy = item["hierarchy"]
-                            break            
-
-                LM_kzo = worker['workAssignments'][active_job_position].get('reportsTo',[{}])[0].get("associateOID")
-                # Find matching display_id (case-insensitive)
-                CascadeID = None
-
-                for entry in cascade_responses:
-                    if entry["NationalInsuranceNumber"] == ADP_identifier:
-                        CascadeID = entry["DisplayId"]
-                        Cascade_full = entry["Id"]
-                        contServiceCascade = entry["ContinuousServiceDate"]
-                        break
-                
-                if CascadeID is None:
-                    date = formatted_date
-                    contServiceCascade = None
-                else:
-                    date = min(contServiceCascade,formatted_date)
-
-                        
-                # Create a dictionary for the transformed data
-                transformed_record = {
-                    "AOID": id_value,
-                    "CascadeId": CascadeID if CascadeID is not None else None,
-                    "Cascade_full": Cascade_full if CascadeID is not None else None, 
-                    "ADP_number": ADP_identifier,
-                    "ADP_line_manager": LM_kzo,
-                    "Job_position": active_job_position,
-                    "Hierarchy": hierarchy,
-                    "Job Code": job_code,
-                    "job Name": job_name,
-                    "contServiceDate": date,
-                }
-                ID_library.append(transformed_record)
-
-        if Data_export:
-            file_path = os.path.join(data_store,"002 - Security and Global","003 - ID_library.json")
-            with open(file_path, "w") as outfile:
-                json.dump(ID_library, outfile, indent=4)
+            H1 = df_1.where(pd.notna(df_1), None).to_dict(orient='records')
+            for item in H1:
+                item["job_code"] = str(item["job_code"])
+                item["hierarchy"] = str(item["hierarchy"])
         
-        return ID_library
+            H2 = df_2.where(pd.notna(df_2), None).to_dict(orient='records')
+            for item in H2:
+                item["job_code"] = str(item["job_code"])
+                item["hierarchy"] = str(item["hierarchy"])
+
+            if Data_export:
+                export_data("002 - Security and Global","002 - Can Hierarchy (both).json", H1)    
+                export_data("002 - Security and Global","002 - Can Hierarchy (single).json", H2)    
+
+            
+            hierarchy = None
+            for item in H1:
+                if item["job_code"] == job_code and item["job_name"] in job_name:
+                    hierarchy = item["hierarchy"]
+                    break
+            if hierarchy is None:
+                for item in H2:
+                    if item["job_code"] == job_code:
+                        hierarchy = item["hierarchy"]
+                        break            
+
+
+            CascadeID,Cascade_full,contServiceCascade = find_cascade_id_and_cont_service(ADP_identifier)
+            
+            if CascadeID is None:
+                date = formatted_date
+                contServiceCascade = None
+            else:
+                date = min(contServiceCascade,formatted_date)
+
+        transformed_record = {
+            "AOID": id_value,
+            "CascadeId": CascadeID if CascadeID is not None else None,
+            "Cascade_full": Cascade_full if CascadeID is not None else None, 
+            "ADP_number": ADP_identifier,
+            "ADP_line_manager": LM_kzo,
+            "Job_position": active_job_position,
+            "Hierarchy": hierarchy_id,
+            "Cascade Start": contServiceCascade,
+            "ADP Start": formatted_date,
+            "contServiceDate": date,
+        }
+        ID_library.append(transformed_record)
+
+    if Data_export:
+        export_data("002 - Security and Global","003 - ID_library.json", ID_library)
+    
+    return ID_library
     
 #----------------------------------------------------------------------------------# Cascade to ADP
 
-def whats_in_ADP(adp_responses, ID_library, country):
+def whats_in_ADP(adp_responses, ID_library):
     ct_POST_cascade_id = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Finding Id's that are missing on Cascade (" + ct_POST_cascade_id + ")")
     ID_responses = []
 
-    for record in adp_responses:
-        workers = record["workers"]
-        for worker in workers:
-            work_assignments = worker.get("workAssignments", [{}])
-            for index, assignment in enumerate(work_assignments):
-                if assignment.get("primaryIndicator", True):
-                    active_job_position = index
-                    continue
-            ADP_number = worker["workAssignments"][active_job_position]["positionID"]
-            if country == "usa":
-                Cascade = worker["person"]["customFieldGroup"]["stringFields"][2].get("stringValue", "")
-            if country == "can":
-                Cascade = worker["customFieldGroup"]["stringFields"][0].get("stringValue", "")
+    for worker in adp_responses:
+        work_assignments = worker.get("workAssignments", [{}])
+        for index, assignment in enumerate(work_assignments):
+            if assignment.get("primaryIndicator", True):
+                active_job_position = index
+                continue
+        ADP_number = worker["workAssignments"][active_job_position]["positionID"]       
+        Cascade = worker["person"]["customFieldGroup"]["stringFields"][2].get("stringValue", "")
 
-            cascade_exists_in_library = False
+        cascade_exists_in_library = False
 
+        for record in ID_library:
+            if record["CascadeId"] == Cascade:
+                cascade_exists_in_library = True
+                break             
+        
+        if not cascade_exists_in_library:              
             for record in ID_library:
-                if record["CascadeId"] == Cascade:
-                    cascade_exists_in_library = True
-                    break             
+                if record["ADP_number"]==ADP_number:
+                    Cascade = record["CascadeId"]
+                    AOID = record["AOID"]
             
-            if not cascade_exists_in_library:              
-                for record in ID_library:
-                    if record["ADP_number"]==ADP_number:
-                        Cascade = record["CascadeId"]
-                        AOID = record["AOID"]
-                
-                transformed_record = {
-                    "AOID": AOID,
-                    "Cascade": Cascade
-                    #"Cascade": Cascade if Cascade is not None else ""              #Use this to strip CascadeId's out of Canadian Records
-                    }
+            transformed_record = {
+                "AOID": AOID,
+                "Cascade": Cascade
+                #"Cascade": Cascade if Cascade is not None else ""              #Use this to strip CascadeId's out of Canadian Records
+                }
 
-                ID_responses.append(transformed_record)
+            ID_responses.append(transformed_record)
     
     if Data_export:
-        file_path = os.path.join(data_store,"006 - CascadeId to ADP","003 - IDs_updating.json")
-        with open(file_path, "w") as outfile:
-            json.dump(ID_responses, outfile, indent=4)
-    
+        export_data("006 - CascadeId to ADP","003 - IDs_updating.json", ID_responses)    
+
     return ID_responses
 
 def upload_cascade_Ids_to_ADP(CascadeId_to_upload,country):
@@ -950,10 +722,7 @@ def upload_cascade_Ids_to_ADP(CascadeId_to_upload,country):
             print ("        "+f'Data uploaded for CascadeId: {cascadeId}')
         else:
             print("        "+f'Response Code: {req.status_code}')
-    
-
-    return ct_POST_cascade_id
-    
+       
 #----------------------------------------------------------------------------------# Delete Absences
 
 def load_from_bucket(variable):
@@ -1449,158 +1218,154 @@ def convert_adp_to_cascade_form(records,suffix,terminations,ID_library,x_months_
 
     output = []       
         
-    for record in records:
-        workers = record["workers"]
-        for worker in workers:
-            active_job_position = None
+    for worker in records:
+        active_job_position = None
 
-            work_assignments = worker.get("workAssignments", [{}])
-            for index, assignment in enumerate(work_assignments):
-                if assignment.get("primaryIndicator", True):
-                    active_job_position = index
-                    continue
+        work_assignments = worker.get("workAssignments", [{}])
+        for index, assignment in enumerate(work_assignments):
+            if assignment.get("primaryIndicator", True):
+                active_job_position = index
+                continue
+    
+        gender = worker["person"]["genderCode"].get("shortName",None)
+        salutation = worker["person"]["legalName"].get("preferredSalutations",[{}])[0].get("salutationCode",{}).get("shortName")
+        FirstName = worker["person"]["legalName"]["givenName"]
+        preffered = worker["person"]['legalName'].get("nickName",None)
+        other_name =  worker["person"]["legalName"].get("middleName")
+        family_name = worker["person"]["legalName"]["familyName1"]
+        if c == "usa":
+            display_id = worker["person"]["customFieldGroup"]["stringFields"][2].get("stringValue", "")
+        elif c == "can":
+            display_id = worker["customFieldGroup"]["stringFields"][0].get("stringValue")
         
-            gender = worker["person"]["genderCode"].get("shortName",None)
-            salutation = worker["person"]["legalName"].get("preferredSalutations",[{}])[0].get("salutationCode",{}).get("shortName")
-            FirstName = worker["person"]["legalName"]["givenName"]
-            preffered = worker["person"]['legalName'].get("nickName",None)
-            other_name =  worker["person"]["legalName"].get("middleName")
-            family_name = worker["person"]["legalName"]["familyName1"]
-            if c == "usa":
-                display_id = worker["person"]["customFieldGroup"]["stringFields"][2].get("stringValue", "")
-            elif c == "can":
-                display_id = worker["customFieldGroup"]["stringFields"][0].get("stringValue")
-            
-            WorkingStatus = worker["workerStatus"]["statusCode"]["codeValue"]
-            isManager = worker["workAssignments"][active_job_position].get("managementPositionIndicator")
-            start_date = worker["workAssignments"][active_job_position]["actualStartDate"]
-            end_date = worker["workAssignments"][active_job_position].get("terminationDate")
-            birthDate = worker["person"]["birthDate"]
-            MaritalStatus = worker["person"].get("maritalStatusCode",{}).get("shortName")
-            mobileOwner = worker["person"].get("communication",{}).get("mobiles",[{}])[0].get("nameCode",{}).get("codeValue")
-            mobileNumber = worker["person"].get("communication",{}).get("mobiles",[{}])[0].get("formattedNumber")
-            workEmailValue = worker.get("businessCommunication",{}).get("emails",[{}])[0].get("emailUri")
-            address1 = worker["person"].get("legalAddress",{}).get("lineOne")
-            address2 = worker["person"].get("legalAddress",{}).get("lineTwo")   
-            address3 = worker["person"].get("legalAddress",{}).get("lineThree")
-            address4 = worker["person"].get("legalAddress",{}).get("cityName")                
-            address5 = worker["person"].get("legalAddress",{}).get("countrySubdivisionLevel1",{}).get("shortName")
-            postCode = worker["person"].get("legalAddress",{}).get("postalCode")
-            ADP_id = worker["workAssignments"][active_job_position]["positionID"]
-            leave_reason_code = worker["workAssignments"][active_job_position].get("assignmentStatus", {}).get("reasonCode", {}).get("codeValue")
-            
-            leave_reason = next((termination.get("Cascade_Reason") for termination in terminations if termination.get("ADP_Code") == leave_reason_code), None)
+        WorkingStatus = worker["workerStatus"]["statusCode"]["codeValue"]
+        isManager = worker["workAssignments"][active_job_position].get("managementPositionIndicator")
+        start_date = worker["workAssignments"][active_job_position]["actualStartDate"]
+        end_date = worker["workAssignments"][active_job_position].get("terminationDate")
+        birthDate = worker["person"]["birthDate"]
+        MaritalStatus = worker["person"].get("maritalStatusCode",{}).get("shortName")
+        mobileOwner = worker["person"].get("communication",{}).get("mobiles",[{}])[0].get("nameCode",{}).get("codeValue")
+        mobileNumber = worker["person"].get("communication",{}).get("mobiles",[{}])[0].get("formattedNumber")
+        workEmailValue = worker.get("businessCommunication",{}).get("emails",[{}])[0].get("emailUri")
+        address1 = worker["person"].get("legalAddress",{}).get("lineOne")
+        address2 = worker["person"].get("legalAddress",{}).get("lineTwo")   
+        address3 = worker["person"].get("legalAddress",{}).get("lineThree")
+        address4 = worker["person"].get("legalAddress",{}).get("cityName")                
+        address5 = worker["person"].get("legalAddress",{}).get("countrySubdivisionLevel1",{}).get("shortName")
+        postCode = worker["person"].get("legalAddress",{}).get("postalCode")
+        ADP_id = worker["workAssignments"][active_job_position]["positionID"]
+        leave_reason_code = worker["workAssignments"][active_job_position].get("assignmentStatus", {}).get("reasonCode", {}).get("codeValue")
+        
+        leave_reason = next((termination.get("Cascade_Reason") for termination in terminations if termination.get("ADP_Code") == leave_reason_code), None)
 
-            #Change any of the language from ADP to Iris HR        
-            if WorkingStatus == "Active":
-                WorkingStatus = "Current"
-            if WorkingStatus == "Inactive":                     #This may be removed later - discussion needed AP/KG
-                WorkingStatus = "Current"
-            if WorkingStatus == "Terminated":
-                converted_date = datetime.strptime(end_date, "%Y-%m-%d").strftime("%d/%m/%Y")
-                WorkingStatus = f"Left {converted_date}"
+        #Change any of the language from ADP to Iris HR        
+        if WorkingStatus == "Active":
+            WorkingStatus = "Current"
+        if WorkingStatus == "Inactive":                     #This may be removed later - discussion needed AP/KG
+            WorkingStatus = "Current"
+        if WorkingStatus == "Terminated":
+            converted_date = datetime.strptime(end_date, "%Y-%m-%d").strftime("%d/%m/%Y")
+            WorkingStatus = f"Left {converted_date}"
 
-            if mobileOwner == "Personal Cell":
-                mobileOwner = "Personal"
-            if WorkingStatus == "Current":                      #Override for previous termination date
-                end_date = None
-            if mobileOwner == None:
-                mobileOwner = "Personal"
+        if mobileOwner == "Personal Cell":
+            mobileOwner = "Personal"
+        if WorkingStatus == "Current":                      #Override for previous termination date
+            end_date = None
+        if mobileOwner == None:
+            mobileOwner = "Personal"
 
-            contServiceSplit = start_date  # Default value if no record is found
-            Id = None
+        contServiceSplit = start_date  # Default value if no record is found
+        Id = None
 
-            for entry in ID_library:
-                if entry["ADP_number"] == ADP_id and entry["CascadeId"] is None:
-                    contService = entry["contServiceDate"]
-                    contServiceSplit = contService.split("T")[0]
-                    Id = None
-                elif entry["CascadeId"] == display_id:
-                    contService = entry["contServiceDate"]
-                    contServiceSplit = contService.split("T")[0]
-                    Id = entry["Cascade_full"]   
-                    break  # Exit the loop once a match is found
+        for entry in ID_library:
+            if entry["ADP_number"] == ADP_id and entry["CascadeId"] is None:
+                contService = entry["contServiceDate"]
+                contServiceSplit = contService.split("T")[0]
+                Id = None
+            elif entry["CascadeId"] == display_id:
+                contService = entry["contServiceDate"]
+                contServiceSplit = contService.split("T")[0]
+                Id = entry["Cascade_full"]   
+                break  # Exit the loop once a match is found
 
-            employment_start_date = datetime.strptime(start_date, "%Y-%m-%d")
-            continuous_service_date = datetime.strptime(contServiceSplit, "%Y-%m-%d")
+        employment_start_date = datetime.strptime(start_date, "%Y-%m-%d")
+        continuous_service_date = datetime.strptime(contServiceSplit, "%Y-%m-%d")
 
-            if continuous_service_date > employment_start_date:
-                contServiceSplit = start_date
+        if continuous_service_date > employment_start_date:
+            contServiceSplit = start_date
 
-            transformed_record = {
-                "DisplayId": display_id,
-                "TitleHonorific": salutation,
-                "FirstName": FirstName,
-                "KnownAs": preffered if preffered is not None else FirstName,
-                "OtherName": other_name,
-                "LastName": family_name,
-                "CostCentre": None,
-                "WorkingStatus": WorkingStatus,
-                "IsManager": isManager,
-                "NationalInsuranceNumber": ADP_id,
-                "PayrollId": None,
-                "TaxCode": None,
-                "IncludeInPayroll": True,
-                "EmploymentStartDate": start_date,
-                "EmploymentLeftDate": end_date,
-                "ContinuousServiceDate": contServiceSplit,
-                "DateOfBirth": birthDate,
-                "LastWorkingDate": end_date,
-                "Gender": gender,
-                "Ethnicity": None,
-                "Nationality": None,
-                "Religion": None,
-                "LeaverReason": leave_reason,
-                "MaritalStatus":MaritalStatus,
-                "Phones": [
-                    {
-                "Ownership": mobileOwner,
-                "Type" : "Mobile",
-                "Value": mobileNumber,
-                    }
-                ],
-                "Emails": [
-                    {
-                "Ownership": "Organization",
-                "Value": workEmailValue,
-                    }
-                ],
-                "Addresses": [
-                    {
-                "Ownership": "Personal",
-                "Address1": address1,
-                "Address2": address2,
-                "Address3": address3,
-                "Address4": address4,
-                "Address5": address5,
-                "PostCode": postCode,
+        transformed_record = {
+            "DisplayId": display_id,
+            "TitleHonorific": salutation,
+            "FirstName": FirstName,
+            "KnownAs": preffered if preffered is not None else FirstName,
+            "OtherName": other_name,
+            "LastName": family_name,
+            "CostCentre": None,
+            "WorkingStatus": WorkingStatus,
+            "IsManager": isManager,
+            "NationalInsuranceNumber": ADP_id,
+            "PayrollId": None,
+            "TaxCode": None,
+            "IncludeInPayroll": True,
+            "EmploymentStartDate": start_date,
+            "EmploymentLeftDate": end_date,
+            "ContinuousServiceDate": contServiceSplit,
+            "DateOfBirth": birthDate,
+            "LastWorkingDate": end_date,
+            "Gender": gender,
+            "Ethnicity": None,
+            "Nationality": None,
+            "Religion": None,
+            "LeaverReason": leave_reason,
+            "MaritalStatus":MaritalStatus,
+            "Phones": [
+                {
+            "Ownership": mobileOwner,
+            "Type" : "Mobile",
+            "Value": mobileNumber,
+                }
+            ],
+            "Emails": [
+                {
+            "Ownership": "Organization",
+            "Value": workEmailValue,
+                }
+            ],
+            "Addresses": [
+                {
+            "Ownership": "Personal",
+            "Address1": address1,
+            "Address2": address2,
+            "Address3": address3,
+            "Address4": address4,
+            "Address5": address5,
+            "PostCode": postCode,
 
-                    }
-                ],
-                "GenderIdentity": None,
-                "WindowsUsername": None,
-                "Id": Id,
-            }
+                }
+            ],
+            "GenderIdentity": None,
+            "WindowsUsername": None,
+            "Id": Id,
+        }
 
-            # Filter terminated records to only include those from the last 6 months
-            if suffix == "terminated":
-                if end_date:
-                    try:
-                        termination_date = datetime.strptime(end_date, "%Y-%m-%d")
-                        if termination_date >= x_months_ago:
-                            output.append(transformed_record)
-                    except (ValueError, TypeError):
-                        # If date parsing fails, skip this record
-                        pass
-            else:
-                # For non-terminated records, add all records
-                output.append(transformed_record)
+        # Filter terminated records to only include those from the last 6 months
+        if suffix == "terminated":
+            if end_date:
+                try:
+                    termination_date = datetime.strptime(end_date, "%Y-%m-%d")
+                    if termination_date >= x_months_ago:
+                        output.append(transformed_record)
+                except (ValueError, TypeError):
+                    # If date parsing fails, skip this record
+                    pass
+        else:
+            # For non-terminated records, add all records
+            output.append(transformed_record)
         
         # Save individual dataset files
         if Data_export:
-            file_path = os.path.join(data_store,"003 - Personal to Cascade",f"001 - ADP_to_cascade_{suffix}.json")
-            with open(file_path, "w") as outfile:
-                json.dump(output, outfile, indent=4)
+            export_data("003 - Personal to Cascade",f"001 - ADP_to_cascade_{suffix}.json", output)    
     
     return output
 
@@ -2404,14 +2169,16 @@ def POST_create_jobs(POST_jobs, new_start_jobs):
 #----------------------------------------------------------------------------------# 
 if __name__ == "__main__":
 
-    delete_folders()                                #clears out at the start of every run. Can be recreated if needed
-    time.sleep(1)
+    if testing is False:
+        delete_folders()                                #clears out at the start of every run. Can be recreated if needed
+        time.sleep(1)
+
     global country,creds,project_Id,storage_client
 
     extended_update,Data_export = debug_check(debug)
 
     run_type = find_run_type()
-    #run_type = 1                         #Comment this out in the production version
+    run_type = 1                         #Comment this out in the production version
 
     creds, project_Id = google_auth()
 
@@ -2422,7 +2189,6 @@ if __name__ == "__main__":
         print ("---------------------------------------------------------------------------------------------------------------")
         print (f"Synchronizing country: {c}")                                           #c represents country. Either USA or CAN
 
-
         global access_token, cascade_token, certfile, keyfile, strings_to_exclude, extended_update
         global Data_export, data_store,country_hierarchy_USA, country_hierarchy_CAN
         
@@ -2430,25 +2196,37 @@ if __name__ == "__main__":
 
         client_id, client_secret, strings_to_exclude, country_hierarchy_USA, country_hierarchy_CAN, cascade_API_id, keyfile, certfile = load_keys(c)
 
-        temp_certfile, temp_keyfile = load_ssl(certfile, keyfile)
-        
-        keyfile, certfile, access_token, cascade_token  = security(client_id, client_secret, cascade_API_id, temp_certfile, temp_keyfile)
+        certfile, keyfile = load_ssl(certfile, keyfile)
+
+        access_token = adp_bearer(client_id,client_secret,certfile,keyfile)
+        cascade_token = cascade_bearer (cascade_API_id)
+
         
         #----------     Global Data Calls     ----------#
         time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print ("    Making global calls (" + time_now + ")")
-        adp_responses, adp_terminations         = GET_workers_adp()
-        cascade_responses                       = GET_workers_cascade()
-        hierarchy_nodes                         = GET_hierarchy_nodes(c)
-        ID_library                              = ID_generator(c,adp_responses,cascade_responses,hierarchy_nodes)
+        
+        global adp_responses,cascade_responses,hierarchy_nodes                              #Remove this after rebuilding ID Library Code
 
+        if testing:
+            load("002 - Security and Global","001 - ADP (Data Out - active).json","adp_responses")
+            load("002 - Security and Global","001 - Cascade Raw Out.json","cascade_responses")
+            load("002 - Security and Global","002 - Hierarchy Nodes.json","hierarchy_nodes")
+            
+        else:
+            adp_responses, adp_terminated, adp_leave    = GET_workers_adp()
+            cascade_responses                           = GET_workers_cascade()
+            hierarchy_nodes                             = GET_hierarchy_list(c)
+        
+        ID_library                                  = ID_generator(c,adp_responses,hierarchy_nodes)
+        sys.exit()
         #----------     Push New Cascade Id's back to Cascade     ----------#
         if run_type == 1:
             
             time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             print ("    Pushing Cascade Id's back to ADP (" + time_now + ")")
 
-            CascadeId_to_upload             = whats_in_ADP(adp_responses, ID_library, c)
+            CascadeId_to_upload             = whats_in_ADP(adp_responses, ID_library)
             upload_cascade_Ids_to_ADP(CascadeId_to_upload,c)
 
         #----------     Delete removed Absences     ----------#
@@ -2512,7 +2290,7 @@ if __name__ == "__main__":
                 terminations = load_csv_from_bucket("USA_termination_mapping")
 
             adp_to_cascade                                              = convert_adp_to_cascade_form(adp_responses,"all",terminations,ID_library)
-            adp_to_cascade_terminated                                   = convert_adp_to_cascade_form(adp_terminations,"terminated",terminations,ID_library,x_months_ago)
+            adp_to_cascade_terminated                                   = convert_adp_to_cascade_form(adp_terminated,"terminated",terminations,ID_library,x_months_ago)
 
             cascade_reordered                                           = cascade_rejig_personal(cascade_responses)
             records_to_upload, new_starters, unterminated_staff         = combine_json_files(adp_to_cascade_terminated,adp_to_cascade,cascade_reordered)
