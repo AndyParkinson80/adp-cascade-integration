@@ -1,5 +1,6 @@
 # Standard Library - Core
 import os
+import io
 import sys
 import json
 import math
@@ -18,6 +19,7 @@ import shutil
 
 # Third-party - Data Processing
 import pandas as pd
+import numpy as np
 import requests
 
 # Google Cloud Platform
@@ -27,14 +29,16 @@ from google.oauth2 import service_account
 from google.cloud import secretmanager
 from google.cloud import storage
 
-debug = True
-testing = True
-Data_export = True
+debug = False
+testing = False
+#Data_export = False
 
 current_folder = Path(__file__).resolve().parent
 
 adp_workers = 'https://api.adp.com/hr/v2/workers'
 cascade_workers = 'https://api.iris.co.uk/hr/v2/employees?%24count=true'
+cascade_workers_base = 'https://api.iris.co.uk/hr/v2/employees/'
+cascade_jobs_url = 'https://api.iris.co.uk/hr/v2/jobs?%24count=true'
 
 #----------------------------------------------------------------------------------# Set up
 
@@ -164,21 +168,17 @@ def google_auth():
 
 def debug_check(debug):
     if debug:
-        folder_paths = create_folders(current_folder)
-        print("Created folders:")
-        #for path in folder_paths:
-        #    print(path)
+        if testing is False:
+            create_folders(current_folder)     
         extended_update = False                                          
         Data_export = True
+    
     else:
         extended_update = True                                                            
-        Data_export = True
-        if Data_export:
-            folder_paths = create_folders(current_folder)
-            print("Created folders:")
-            #for path in folder_paths:
-            #    print(path)
-        
+        Data_export = False
+        if testing is False:
+            create_folders(current_folder)
+                    
     return extended_update,Data_export
 
 def data_store_location(country):
@@ -321,11 +321,16 @@ def api_count_cascade(api_response,page_size):
     response_data = api_response.json()
     total_number = response_data['@odata.count']
     api_calls = math.ceil(total_number / page_size)
-    
+
     return api_calls
 
-def api_call_cascade(api_url,api_headers,api_params=None):
-    api_response = requests.get(api_url, headers = api_headers, params = api_params)
+def api_call_cascade(cascade_token,api_url,api_params=None):
+
+    cascade_api_headers = {
+    'Authorization': f'Bearer {cascade_token}',
+    }
+
+    api_response = requests.get(api_url, headers = cascade_api_headers, params = api_params)
     time.sleep(0.6)   
    
     return api_response
@@ -341,14 +346,15 @@ def status_type(status):
     return status_map.get(status)
 
 def GET_workers_adp():
+
+    global adp_active,adp_terminated,adp_leave
+    adp_active = []
+    adp_terminated = []
+    adp_leave = []
+
     for status in ["active","leave","terminated"]:
         print (f"       Downloading ADP Staff with the status - {status}")
-        
-        global adp_active,adp_terminated,adp_leave
-        adp_active = []
-        adp_terminated = []
-        adp_leave = []
-        
+               
         type = status_type (status)
         
         page_size = 100
@@ -379,7 +385,7 @@ def GET_workers_adp():
         if Data_export:
             export_data("002 - Security and Global", f"001 - ADP (Data Out - {status}).json", globals()[f"adp_{status}"])    
 
-    return adp_active, adp_terminated, adp_leave
+    return adp_active, adp_leave, adp_terminated
 
 def GET_workers_cascade():
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -390,11 +396,7 @@ def GET_workers_cascade():
 
     page_size = 200
 
-    api_headers = {
-        'Authorization': f'Bearer {cascade_token}',
-    }   
-
-    api_response = api_call_cascade(cascade_workers,api_headers,None)
+    api_response = api_call_cascade(cascade_token,cascade_workers,None)
     api_calls = api_count_cascade(api_response,page_size)                
 
     for i in range(api_calls):
@@ -404,7 +406,7 @@ def GET_workers_cascade():
                 "$skip": skip_param
             } 
             
-            api_response = api_call_cascade(cascade_workers,api_headers,api_params)
+            api_response = api_call_cascade(cascade_token,cascade_workers,api_params)
 
             if api_response.status_code == 200:
                 json_data = api_response.json()
@@ -495,6 +497,7 @@ def find_active_job_position(worker):
     return active_job_position
 
 def find_cascade_id_and_cont_service(ADP_identifier):
+    CascadeID = Cascade_full = contServiceCascade = None
     for entry in cascade_responses:
         # Safely get the NationalInsuranceNumber or skip if missing
         if entry.get("NationalInsuranceNumber") == ADP_identifier:
@@ -508,15 +511,43 @@ def find_cascade_id_and_cont_service(ADP_identifier):
             break  # Exit loop once a match is found
     return CascadeID,Cascade_full,contServiceCascade
 
-def ID_generator(country,adp_responses,hierarchy_nodes):
+def find_hierarchy_id(job_code,job_name,hierarchy_library,hierarchy_nodes): 
+    hierarchy = None 
+    hierarchy_id = None
+    
+    # First pass: try exact match (code + name) 
+    for item in hierarchy_library: 
+        if str(item["adp_code"]) == str(job_code) and str(item["adp_name"]) == str(job_name): 
+            hierarchy = str(item["cascade_code"])
+            break 
+        
+        # Second pass: if no exact match, try fallback (code + name is None) 
+        if hierarchy is None: 
+            for item in hierarchy_library: 
+                if str(item["adp_code"]) == str(job_code) and item["adp_name"] is None: 
+                    hierarchy = str(item["cascade_code"])
+                    break 
+        
+        for node in hierarchy_nodes:
+            if node["SourceSystemId"] == str(hierarchy):
+                hierarchy_id = node["Id"]
+                break
+
+    return hierarchy_id
+
+def ID_generator(country,adp_responses):
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("    Creating an ID library (" + time_now + ")")
 
-    ID_library = []
-    file_path = os.path.join(current_folder,"Hierarchy.xlsx")
-    df = pd.read_excel(file_path, sheet_name=f"{country} Conversion")
-    hierarchy_library = df.where(pd.notna(df), None).to_dict(orient = 'records')
+    xlsx_in_memory = load_xlsx_from_bucket("Hierarchy")
+    df = pd.read_excel(xlsx_in_memory, sheet_name=f"{country} Conversion")
+    df = df.replace({np.nan: None})
+    df['adp_code'] = df['adp_code'].astype(str)
+    df['cascade_code'] = pd.to_numeric(df['cascade_code'], errors='coerce')
+    hierarchy_library = df.to_dict(orient='records')
     
+    ID_library = []
+
     if Data_export:
         export_data("002 - Security and Global",f"002 - {country} Hierarchy.json", hierarchy_library)    
 
@@ -530,77 +561,24 @@ def ID_generator(country,adp_responses,hierarchy_nodes):
         ADP_identifier = worker["workAssignments"][active_job_position]["positionID"]
         LM_kzo = worker['workAssignments'][active_job_position].get('reportsTo',[{}])[0].get("associateOID")
 
+        job_code = job_name = CascadeID = None
 
         if country == "usa":
             job_code = worker["workAssignments"][active_job_position]["homeOrganizationalUnits"][1]["nameCode"]["codeValue"]
-            job_name = ""
-
-            for item in H1:
-                item["ADP Code"] = str(item["ADP Code"])
-                item["Cascade Code"] = str(item["Cascade Code"])
-
-            hierarchy = None
-            for item in hierarchy_library:
-                if item["ADP Code"] == job_code:
-                    hierarchy = item["Cascade Code"]
-                    break
-
-            for node in hierarchy_nodes:
-                if node.get("SourceSystemId") == hierarchy:
-                    hierarchy_id = node.get("Id",None)
-
-            CascadeID = None
-            CascadeID,Cascade_full,contServiceCascade = find_cascade_id_and_cont_service(ADP_identifier)
-
-            if CascadeID is None:
-                date = formatted_date
-                contServiceCascade = None
-            else:
-                date = min(contServiceCascade,formatted_date)
 
         elif country == "can":
             job_code = worker["workAssignments"][active_job_position]["homeOrganizationalUnits"][0]["nameCode"]["codeValue"]
-            job_name = worker["workAssignments"][active_job_position]["jobTitle"]
-            
-            df_1 = df.dropna()
+            job_name = worker["workAssignments"][active_job_position]["jobCode"]["codeValue"]
 
-            df_2 = df[df.isna().any(axis=1)]
-            df_2 = df_2.drop(columns=['job_name'])
+        CascadeID, Cascade_full, contServiceCascade = find_cascade_id_and_cont_service(ADP_identifier)
 
-            H1 = df_1.where(pd.notna(df_1), None).to_dict(orient='records')
-            for item in H1:
-                item["job_code"] = str(item["job_code"])
-                item["hierarchy"] = str(item["hierarchy"])
-        
-            H2 = df_2.where(pd.notna(df_2), None).to_dict(orient='records')
-            for item in H2:
-                item["job_code"] = str(item["job_code"])
-                item["hierarchy"] = str(item["hierarchy"])
+        hierarchy_id = find_hierarchy_id(job_code, job_name, hierarchy_library,hierarchy_nodes)
 
-            if Data_export:
-                export_data("002 - Security and Global","002 - Can Hierarchy (both).json", H1)    
-                export_data("002 - Security and Global","002 - Can Hierarchy (single).json", H2)    
-
-            
-            hierarchy = None
-            for item in H1:
-                if item["job_code"] == job_code and item["job_name"] in job_name:
-                    hierarchy = item["hierarchy"]
-                    break
-            if hierarchy is None:
-                for item in H2:
-                    if item["job_code"] == job_code:
-                        hierarchy = item["hierarchy"]
-                        break            
-
-
-            CascadeID,Cascade_full,contServiceCascade = find_cascade_id_and_cont_service(ADP_identifier)
-            
-            if CascadeID is None:
-                date = formatted_date
-                contServiceCascade = None
-            else:
-                date = min(contServiceCascade,formatted_date)
+        if CascadeID is None:
+            date = formatted_date
+            contServiceCascade = None
+        else:
+            date = min(contServiceCascade,formatted_date)
 
         transformed_record = {
             "AOID": id_value,
@@ -609,23 +587,49 @@ def ID_generator(country,adp_responses,hierarchy_nodes):
             "ADP_number": ADP_identifier,
             "ADP_line_manager": LM_kzo,
             "Job_position": active_job_position,
+            "Job Code": job_code,
+            "Job Name": job_name,
             "Hierarchy": hierarchy_id,
             "Cascade Start": contServiceCascade,
             "ADP Start": formatted_date,
             "contServiceDate": date,
         }
+        
         ID_library.append(transformed_record)
 
     if Data_export:
         export_data("002 - Security and Global","003 - ID_library.json", ID_library)
-    
     return ID_library
     
 #----------------------------------------------------------------------------------# Cascade to ADP
 
-def whats_in_ADP(adp_responses, ID_library):
+def create_cascadeID_update_list(ID_library, cascade, adp):
+    cascade_exists_in_library = False
+
+    for record in ID_library:
+        if record["CascadeId"] == cascade:
+            cascade_exists_in_library = True
+            break             
+    
+    if not cascade_exists_in_library:              
+        for record in ID_library:
+            if record["ADP_number"] == adp:
+                cascade = record["CascadeId"]
+                AOID = record["AOID"]
+                break  # Added break for efficiency once match is found
+        
+        transformed_record = {
+            "AOID": AOID,
+            "Cascade": cascade
+            # "Cascade": Cascade if Cascade is not None else ""  # Use this to strip CascadeId's out of Canadian Records
+        }
+
+        return transformed_record
+
+def whats_in_ADP(adp_responses, ID_library,c):
     ct_POST_cascade_id = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Finding Id's that are missing on Cascade (" + ct_POST_cascade_id + ")")
+
     ID_responses = []
 
     for worker in adp_responses:
@@ -634,30 +638,18 @@ def whats_in_ADP(adp_responses, ID_library):
             if assignment.get("primaryIndicator", True):
                 active_job_position = index
                 continue
-        ADP_number = worker["workAssignments"][active_job_position]["positionID"]       
-        Cascade = worker["person"]["customFieldGroup"]["stringFields"][2].get("stringValue", "")
-
-        cascade_exists_in_library = False
-
-        for record in ID_library:
-            if record["CascadeId"] == Cascade:
-                cascade_exists_in_library = True
-                break             
         
-        if not cascade_exists_in_library:              
-            for record in ID_library:
-                if record["ADP_number"]==ADP_number:
-                    Cascade = record["CascadeId"]
-                    AOID = record["AOID"]
-            
-            transformed_record = {
-                "AOID": AOID,
-                "Cascade": Cascade
-                #"Cascade": Cascade if Cascade is not None else ""              #Use this to strip CascadeId's out of Canadian Records
-                }
+        ADP_number = worker["workAssignments"][active_job_position]["positionID"]       
+        
+        if c == "usa":
+            cascade = worker["person"]["customFieldGroup"]["stringFields"][2].get("stringValue", "")
+        if c == "can":
+            cascade = worker["customFieldGroup"]["stringFields"][0].get("stringValue", "")
 
+        transformed_record = create_cascadeID_update_list(ID_library, cascade, ADP_number)
+        if transformed_record is not None:  # Only append if we got a valid record back
             ID_responses.append(transformed_record)
-    
+
     if Data_export:
         export_data("006 - CascadeId to ADP","003 - IDs_updating.json", ID_responses)    
 
@@ -711,7 +703,6 @@ def upload_cascade_Ids_to_ADP(CascadeId_to_upload,country):
 
         data_to_write = json.dumps(schema, indent=4)
 
-
         api_headers = {
             'Authorization': f'Bearer {access_token}',
             'Content-Type': "application/json",
@@ -736,9 +727,9 @@ def load_from_bucket(variable):
     return string_list
 
 def create_absences_reasons():
-    file_path = os.path.join(current_folder,"Hierarchy.xlsx")                                               #creates a dictionary to link ADP and cascade absence codes
-    df = pd.read_excel(file_path,sheet_name=f"{c} Absences")
-    
+    xlsx_in_memory = load_xlsx_from_bucket("Hierarchy")
+    df = pd.read_excel(xlsx_in_memory, sheet_name=f"{c} Absences")
+                          
     if c == "usa":
         absence_reasons = df.where(pd.notna(df), None).to_dict(orient='records')
         for item in absence_reasons:
@@ -1169,19 +1160,16 @@ def DELETE(delete_ids):
     
         time.sleep(0.6)  
 
-#----------------------------------------------------------------------------------# Update Personal
-
+#---------------------Update Personal Details (Run Type 3)
+#---------------------------------------Support Functions
 def make_api_request(DisplayId):
-    api_url = 'https://api.iris.co.uk/hr/v2/employees?%24count=true'
-    api_headers = {
-        'Authorization': f'Bearer {cascade_token}',
-    }
 
     api_params = {
         "$filter": f"DisplayId eq '{DisplayId}'",
         "$select": "DisplayId,Id,ContinuousServiceDate",
     }                
-    api_response = requests.get(api_url, headers=api_headers, params=api_params)
+    
+    api_response = api_call_cascade(cascade_token,cascade_workers, api_params)
     response_data = api_response.json()       
     cascade_id_full = response_data['value'][0]['Id']
     cont_service_raw = response_data['value'][0]['ContinuousServiceDate']
@@ -1212,6 +1200,82 @@ def load_csv_from_bucket(name):
 
     return result
 
+def load_xlsx_from_bucket(name):
+    bucket_name = "event_list_objects"
+    file_name = f"{name}.xlsx"
+
+    # Reference the bucket and blob
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(file_name)
+
+    # Download file contents into memory
+    data = blob.download_as_bytes()
+
+    # Wrap in BytesIO for in-memory use
+    xlsx_file = io.BytesIO(data)
+
+    return xlsx_file
+
+def find_active_job_position(worker):
+    active_job_position = None
+
+    work_assignments = worker.get("workAssignments", [{}])
+    for index, assignment in enumerate(work_assignments):
+        if assignment.get("primaryIndicator", True):
+            active_job_position = index
+            continue
+    return active_job_position
+
+def find_cascade_personal_data_from_ID(ADP_id, ID_library, display_id,start_date):
+    contServiceSplit = start_date  # Default value if no record is found
+    Id = None
+   
+    for entry in ID_library:
+        if entry["ADP_number"] == ADP_id and entry["CascadeId"] is None:
+            contService = entry["contServiceDate"]
+            contServiceSplit = contService.split("T")[0]
+            Id = None
+            break  # Exit the loop once a match is found
+        elif entry["CascadeId"] == display_id:
+            contService = entry["contServiceDate"]
+            contServiceSplit = contService.split("T")[0]
+            Id = entry["Cascade_full"]   
+            break  # Exit the loop once a match is found
+    
+    return contServiceSplit,Id
+
+def convert_us_language_to_uk(workingStatus,end_date,mobileOwner):
+    if workingStatus == "Active":
+        workingStatus = "Current"
+    if workingStatus == "Inactive":                     #This may be removed later - discussion needed AP/KG
+        workingStatus = "Current"
+    if workingStatus == "Terminated":
+        converted_date = datetime.strptime(end_date, "%Y-%m-%d").strftime("%d/%m/%Y")
+        workingStatus = f"Left {converted_date}" 
+    if workingStatus == "Current":                      #Override for previous termination date
+        end_date = None
+    
+    if mobileOwner == "Personal Cell":
+        mobileOwner = "Personal"
+    if mobileOwner == None:
+        mobileOwner = "Personal"
+
+    return workingStatus,end_date,mobileOwner
+
+def find_cont_service(contServiceSplit,start_date):
+    employment_start_date = datetime.strptime(start_date, "%Y-%m-%d")
+    continuous_service_date = datetime.strptime(contServiceSplit, "%Y-%m-%d")
+       
+    if continuous_service_date > employment_start_date:
+        contServiceSplit = start_date
+    
+    return contServiceSplit
+
+def convert_datetime_to_date(datetime_str):
+    dt_object = datetime.strptime(datetime_str, "%Y-%m-%dT%H:%M:%SZ")
+    return dt_object.strftime("%Y-%m-%d")
+
+#---------------------------------------Main Functions
 def convert_adp_to_cascade_form(records,suffix,terminations,ID_library,x_months_ago=None):                         
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Converting the adp data to the cascade form (" + time_now+ ")")
@@ -1219,31 +1283,23 @@ def convert_adp_to_cascade_form(records,suffix,terminations,ID_library,x_months_
     output = []       
         
     for worker in records:
-        active_job_position = None
-
-        work_assignments = worker.get("workAssignments", [{}])
-        for index, assignment in enumerate(work_assignments):
-            if assignment.get("primaryIndicator", True):
-                active_job_position = index
-                continue
-    
+        active_job_position = find_active_job_position(worker)
         gender = worker["person"]["genderCode"].get("shortName",None)
         salutation = worker["person"]["legalName"].get("preferredSalutations",[{}])[0].get("salutationCode",{}).get("shortName")
-        FirstName = worker["person"]["legalName"]["givenName"]
+        firstName = worker["person"]["legalName"]["givenName"]
         preffered = worker["person"]['legalName'].get("nickName",None)
         other_name =  worker["person"]["legalName"].get("middleName")
         family_name = worker["person"]["legalName"]["familyName1"]
         if c == "usa":
             display_id = worker["person"]["customFieldGroup"]["stringFields"][2].get("stringValue", "")
         elif c == "can":
-            display_id = worker["customFieldGroup"]["stringFields"][0].get("stringValue")
-        
-        WorkingStatus = worker["workerStatus"]["statusCode"]["codeValue"]
+            display_id = worker["customFieldGroup"]["stringFields"][0].get("stringValue")     
+        workingStatus = worker["workerStatus"]["statusCode"]["codeValue"]
         isManager = worker["workAssignments"][active_job_position].get("managementPositionIndicator")
         start_date = worker["workAssignments"][active_job_position]["actualStartDate"]
         end_date = worker["workAssignments"][active_job_position].get("terminationDate")
         birthDate = worker["person"]["birthDate"]
-        MaritalStatus = worker["person"].get("maritalStatusCode",{}).get("shortName")
+        maritalStatus = worker["person"].get("maritalStatusCode",{}).get("shortName")
         mobileOwner = worker["person"].get("communication",{}).get("mobiles",[{}])[0].get("nameCode",{}).get("codeValue")
         mobileNumber = worker["person"].get("communication",{}).get("mobiles",[{}])[0].get("formattedNumber")
         workEmailValue = worker.get("businessCommunication",{}).get("emails",[{}])[0].get("emailUri")
@@ -1255,54 +1311,22 @@ def convert_adp_to_cascade_form(records,suffix,terminations,ID_library,x_months_
         postCode = worker["person"].get("legalAddress",{}).get("postalCode")
         ADP_id = worker["workAssignments"][active_job_position]["positionID"]
         leave_reason_code = worker["workAssignments"][active_job_position].get("assignmentStatus", {}).get("reasonCode", {}).get("codeValue")
-        
         leave_reason = next((termination.get("Cascade_Reason") for termination in terminations if termination.get("ADP_Code") == leave_reason_code), None)
 
         #Change any of the language from ADP to Iris HR        
-        if WorkingStatus == "Active":
-            WorkingStatus = "Current"
-        if WorkingStatus == "Inactive":                     #This may be removed later - discussion needed AP/KG
-            WorkingStatus = "Current"
-        if WorkingStatus == "Terminated":
-            converted_date = datetime.strptime(end_date, "%Y-%m-%d").strftime("%d/%m/%Y")
-            WorkingStatus = f"Left {converted_date}"
-
-        if mobileOwner == "Personal Cell":
-            mobileOwner = "Personal"
-        if WorkingStatus == "Current":                      #Override for previous termination date
-            end_date = None
-        if mobileOwner == None:
-            mobileOwner = "Personal"
-
-        contServiceSplit = start_date  # Default value if no record is found
-        Id = None
-
-        for entry in ID_library:
-            if entry["ADP_number"] == ADP_id and entry["CascadeId"] is None:
-                contService = entry["contServiceDate"]
-                contServiceSplit = contService.split("T")[0]
-                Id = None
-            elif entry["CascadeId"] == display_id:
-                contService = entry["contServiceDate"]
-                contServiceSplit = contService.split("T")[0]
-                Id = entry["Cascade_full"]   
-                break  # Exit the loop once a match is found
-
-        employment_start_date = datetime.strptime(start_date, "%Y-%m-%d")
-        continuous_service_date = datetime.strptime(contServiceSplit, "%Y-%m-%d")
-
-        if continuous_service_date > employment_start_date:
-            contServiceSplit = start_date
+        workingStatus,end_date,mobileOwner = convert_us_language_to_uk(workingStatus,end_date,mobileOwner)
+        contServiceSplit,Id = find_cascade_personal_data_from_ID(ADP_id,ID_library,display_id,start_date)
+        contServiceSplit = find_cont_service(contServiceSplit,start_date)
 
         transformed_record = {
             "DisplayId": display_id,
             "TitleHonorific": salutation,
-            "FirstName": FirstName,
-            "KnownAs": preffered if preffered is not None else FirstName,
+            "FirstName": firstName,
+            "KnownAs": preffered if preffered is not None else firstName,
             "OtherName": other_name,
             "LastName": family_name,
             "CostCentre": None,
-            "WorkingStatus": WorkingStatus,
+            "WorkingStatus": workingStatus,
             "IsManager": isManager,
             "NationalInsuranceNumber": ADP_id,
             "PayrollId": None,
@@ -1318,7 +1342,7 @@ def convert_adp_to_cascade_form(records,suffix,terminations,ID_library,x_months_
             "Nationality": None,
             "Religion": None,
             "LeaverReason": leave_reason,
-            "MaritalStatus":MaritalStatus,
+            "MaritalStatus":maritalStatus,
             "Phones": [
                 {
             "Ownership": mobileOwner,
@@ -1373,10 +1397,6 @@ def cascade_rejig_personal(cascade_responses):
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Faffling about with the order of Cascade to allow comparison (" + time_now + ")")
 
-    def convert_datetime_to_date(datetime_str):
-        dt_object = datetime.strptime(datetime_str, "%Y-%m-%dT%H:%M:%SZ")
-        return dt_object.strftime("%Y-%m-%d")
-
     #Takes the raw data from Cascade and reorders into the format needed for the upload.
     cascade_reordered = [
                 {
@@ -1415,9 +1435,8 @@ def cascade_rejig_personal(cascade_responses):
     ]
 
     if Data_export:
-        file_path = os.path.join(data_store,"003 - Personal to Cascade","002 - Cascade_reordered.json")
-        with open(file_path, "w") as json_file:
-            json.dump(cascade_reordered, json_file, indent=4)
+        export_data("003 - Personal to Cascade","002 - Cascade_reordered.json", cascade_reordered)    
+    
 
     return cascade_reordered
 
@@ -1444,8 +1463,7 @@ def combine_json_files(adp_to_cascade_terminated,adp_to_cascade,cascade_reordere
     update_personal = [entry for entry in update_personal if entry.get('DisplayId') not in [None,""]]
     print("             Updating Staff: "+str(len(update_personal)))
 
-    # New Section: Filter out terminated staff that are still present in cascade_reordered
-    #cascade_ids = {entry.get("DisplayId") for entry in cascade_reordered}
+
     unterminated_staff = [entry for entry in adp_to_cascade_terminated 
                             if any(c.get('DisplayId') == entry.get('DisplayId') and c.get('LastWorkingDate') is None 
                             for c in cascade_reordered)]
@@ -1478,21 +1496,10 @@ def combine_json_files(adp_to_cascade_terminated,adp_to_cascade,cascade_reordere
             del entry['Id']
     
     if Data_export:
-        file_path_out = os.path.join(data_store,"003 - Personal to Cascade","003a - Non Matching records.json")
-        with open(file_path_out, 'w') as output_file:
-            json.dump(unique_entries, output_file, indent=2)
-    
-        file_path_out = os.path.join(data_store,"003 - Personal to Cascade", "003b - Updated Records.json")
-        with open(file_path_out, 'w') as output_file:
-            json.dump(update_personal, output_file, indent=2)
-
-        file_path_out = os.path.join(data_store,"003 - Personal to Cascade", "003c - New Starters.json")
-        with open(file_path_out, 'w') as output_file:
-            json.dump(new_starters, output_file, indent=2)
-    
-        file_path_out = os.path.join(data_store, "003 - Personal to Cascade", "003d - Terminated Staff.json")
-        with open(file_path_out, 'w') as output_file:
-            json.dump(processed_unterminated_records, output_file, indent=2)
+        export_data("003 - Personal to Cascade","003a - Non Matching records.json", unique_entries)    
+        export_data("003 - Personal to Cascade","003b - Updated Records.json", update_personal)    
+        export_data("003 - Personal to Cascade","003c - New Starters.json", new_starters)    
+        export_data("003 - Personal to Cascade","003d - Terminated Staff.json", processed_unterminated_records)    
 
     return update_personal, new_starters, processed_unterminated_records
 
@@ -1513,28 +1520,24 @@ def PUT_cascade_workers_personal(list_of_staff):
 
         transformed_record = entry
                 
-        api_base = 'https://api.iris.co.uk/hr/v2/employees/'
         cascade_identifier = employee_id
     
-        api_url = api_base + cascade_identifier         
+        api_url = cascade_workers_base + cascade_identifier         
 
         headers = {
             'Authorization': f'Bearer {cascade_token}',
             'Content-Type':'text/json; version=2',
             'Content-Length': '22',
         }
-        
-        
+                
         response = requests.put(api_url, headers=headers, json=transformed_record)
         
         if response.status_code == 204:
             print("             " + f'Personal information transfer for {FirstName} {LastName} ({display_id}) complete. {response.status_code}')
         else:
             print("             " + f'Data Transfer for {FirstName} {LastName} - {display_id} has failed. Response Code: {response.status_code}')           
-        time.sleep(0.75) 
+        time.sleep(0.6) 
     
-        #input("Enter to continue")
-
 def POST_new_starters(new_starters): 
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Adding new staff (" + time_now + ")")                              
@@ -1544,13 +1547,9 @@ def POST_new_starters(new_starters):
         entry["DisplayId"] = None
 
         transformed_record = entry
-        api_url = 'https://api.iris.co.uk/hr/v2/employees'
         
         if Data_export:
-            file_path = os.path.join(data_store,"003 - Personal to Cascade","005 - New Start.json")
-            with open(file_path, "w") as outfile:
-                json.dump(transformed_record, outfile, indent=4)
-
+            export_data("003 - Personal to Cascade","005 - New Start.json", transformed_record)    
 
         headers = {
             'Authorization': f'Bearer {cascade_token}',
@@ -1558,112 +1557,190 @@ def POST_new_starters(new_starters):
             'Content-Length': '22',
         }
         
-        response = requests.post(api_url, headers=headers, json=transformed_record)
+        response = requests.post(cascade_workers_base, headers=headers, json=transformed_record)
         
         if response.status_code == 201:
             print("             " + f'New Starter Added ({FirstName} {LastName})')
         else:
             print("             "+f'Data Transfer for New Starter ({FirstName} {LastName}) has failed. Response Code: {response.status_code}')           
-        time.sleep(0.75)  
+        time.sleep(0.6)  
             
-#----------------------------------------------------------------------------------# Update Jobs
+#---------------------Update Job Details (Run Type 4)
+#---------------------------------------Support Functions
+def create_params(page_size,skip_param):
+    api_params = {
+        "$filter": "EndDate eq null",
+        "$top": page_size,
+        "$skip": skip_param
+    }
+    return api_params 
 
-def cascade_current_workers():
-    time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print ("        Retrieving Job Data from Cascade HR (" + time_now + ")")
+def convert_datetime_to_date(datetime_str):
+    dt_object = datetime.strptime(datetime_str, "%Y-%m-%dT%H:%M:%SZ")
+    return dt_object.strftime("%Y-%m-%d")
 
-    api_url = 'https://api.iris.co.uk/hr/v2/jobs?%24count=true'
-    cascade_job_responses = []
+def find_contract(c,worker,active_job_position):
+    base = worker["workAssignments"][active_job_position]
+    if c == "usa":
+        contract = (
+            base.get("workerTypeCode", {}).get("codeValue")
+            or base.get("workerGroups", [{}])[0].get("groupCode", {}).get("codeValue", "")
+        )
+    elif c == "can":
+        contract = base.get("workerTypeCode", {}).get("codeValue", "")
+    return contract
 
-    def make_api_request(skip_param):
-        api_headers = {
-            'Authorization': f'Bearer {cascade_token}',
-        }
-        api_params = {
-            "$filter": "EndDate eq null",
-            "$top": 250,
-            "$skip": skip_param
-        }
+def search_ID_lib(ID_library,ADP_id):
+    for record in ID_library:
+        if record["ADP_number"]==ADP_id:
+            employee_id = record["Cascade_full"]
+            hierarchy_id = record["Hierarchy"]
+            break
+    return employee_id,hierarchy_id   
+
+def find_line_manager(ID_library,LM_AOID,employee_id):
+    xlsx_in_memory = load_xlsx_from_bucket("Hierarchy")
+    df = pd.read_excel(xlsx_in_memory, sheet_name='JJ')
+    reports_to_JJ = df['ID'].tolist()
+
+    if employee_id in reports_to_JJ:
+        line_manager = "b3775d20-8d33-4ca9-aaad-5e2346bb17e9"
+    else:
+        for record in ID_library:
+            if record["AOID"]==LM_AOID:
+                line_manager = record["Cascade_full"]   
+    return line_manager
+
+def choose_paybasis(paybasis_hourly):
+    if paybasis_hourly is not None:
+        paybasis = "Hourly"
+    else:
+        paybasis = "Yearly"
+    return paybasis
+
+def round_salary(pay_hourly,pay_annual):
+    if pay_hourly is not None:
+        salary = float(pay_hourly)
+    else:
+        salary = float(pay_annual)
     
-        api_response = requests.get(api_url, headers=api_headers, params=api_params)
-        time.sleep(0.6)
+    salary_rounded = round(salary,2)   
+    return salary,salary_rounded
+
+def change_contract_language(contract):
+    permanent_codes = {"Full Time", "FT", "FTR", "FTOL", "Regular Full-Time","F"}
+    if contract in permanent_codes:
+        return "Permenent"
+    return "Temporary"
+
+def find_change_reason(record,salary,hierarchy_id,line_manager,startDate):
+    if str(record.get("Salary")) != str(salary):
+        changeReason = "Change of Salary"
+    elif str(record.get("HierarchyNodeId")) != str(hierarchy_id):
+        changeReason = "Change of Position"
+    elif str(record.get("LineManagerId")) != str(line_manager):
+        changeReason = "Change of Manager"
+    elif str(record.get("StartDate")) != str(startDate):
+        changeReason = "Minor Change/Correction"
+    else:
+        changeReason = record.get("ChangeReason")
+    return changeReason
+
+def find_start_date(effective_date_wage,cascadeStart,effective_date_other):
+    wage = datetime.strptime(effective_date_wage, "%Y-%m-%d")
+    cascade = datetime.strptime(cascadeStart, "%Y-%m-%d")
+    other = datetime.strptime(effective_date_other, "%Y-%m-%d")
+
+    startDate = max(wage, cascade, other)
+    startDate = startDate.strftime("%Y-%m-%d")
+    return startDate
+
+def find_new_starters(records_to_add,ID_library):
+    employee_ids = {record["EmployeeId"] for record in records_to_add}
+
+    new_start_jobs = [
+        {"AOID":entry["AOID"]}
+        for entry in ID_library
+        if entry["Cascade_full"] not in employee_ids
+    ]
+    return new_start_jobs
+
+def find_name(employeeId):
+    match = next((item for item in cascade_responses if item["Id"] ==employeeId),None)
+
+    if match:
+        full_name = f"{match['KnownAs']} {match['LastName']}"
+    else:
+        full_name = None
+    return full_name
+
+#---------------------------------------Main Functions
+def cascade_current_jobs():
+    time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print ("    Retrieving current Personal Data from Cascade HR (" + time_now + ")")
+    global cascade_jobs
+
+    page_size = 200
+
+    api_params = create_params(page_size,0)
+
+    api_response = api_call_cascade(cascade_token,cascade_jobs_url,api_params)
+    api_calls = api_count_cascade(api_response,page_size)
+
+    cascade_jobs = []
+
+    for i in range(api_calls):
+        skip_param = i * page_size
+        api_params = create_params(page_size,skip_param)
+
+        api_response = api_call_cascade(cascade_token,cascade_jobs_url,api_params)
 
         if api_response.status_code == 200:
             json_data = api_response.json()
-            cascade_job_responses.append(json_data)
-
-            if not json_data:
-                return True
-        
-        else:
-            print(f"            Failed to retrieve data from API for skip_param {skip_param}. Status code: {api_response.status_code}")
-
-    total_records = 0
-    skip_param = 0
-
-    while total_records <= 4000:
-        if make_api_request(skip_param):
-            break
-        skip_param += 250
-        total_records += 250
-    
-    combined_value=[]
-    for item in cascade_job_responses:
-        combined_value.extend(item["value"])
-
-    combined_data = [{
-        "value": combined_value,
-    }]
+            json_data = json_data['value']
+            cascade_jobs.extend(json_data)    
 
     if Data_export:
-        file_path = os.path.join(data_store,"004 - Jobs to Cascade","001 - Cascade Jobs.json")
-        with open(file_path, "w") as outfile:
-            json.dump(combined_data, outfile, indent=4)
-    
-    return combined_data
+        export_data("004 - Jobs to Cascade","001 - Cascade Jobs.json", cascade_jobs)    
+
+    return cascade_jobs
 
 def cascade_rejig_jobs(cascade_current_jobs):
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Faffling about with the order of Cascade to allow comparison (" + time_now + ")")
 
-    combined_data = [entry for response in cascade_current_jobs for entry in response.get('value', [])]
-
-    def convert_datetime_to_date(datetime_str):
-        dt_object = datetime.strptime(datetime_str, "%Y-%m-%dT%H:%M:%SZ")
-        return dt_object.strftime("%Y-%m-%d")
-
     cascade_reordered = [
-                {
-                "JobTitle": entry.get("JobTitle"),
-                "Classification": entry.get("Classification"),
-                "StartDate": convert_datetime_to_date(entry["StartDate"]) if entry["StartDate"] is not None else None,
-                "EndDate": convert_datetime_to_date(entry["EndDate"]) if entry["EndDate"] is not None else None,
-                "WorkingCalendar": "40hrs Monday to friday",                                        #entry.get("WorkingCalendar"),
-                "LineManagerId": entry.get("LineManagerId"),
-                "HierarchyNodeId": entry.get("HierarchyNodeId"),
-                "Active": entry.get("Active"),
-                "Salary": float(Decimal(entry.get("Salary", 0.0) or 0.0).quantize(Decimal("0.00"), rounding=ROUND_HALF_UP)),
-                "EmployeeId": entry.get("EmployeeId"),
-                "Contract": "Permenent",                                        #Needs to be changed once the updating is sorted
-                "PayFrequency": "Biweekly" if entry.get("PayFrequency") == "Fortnightly" else entry.get("PayFrequency"),
-                "PayBasis": "Yearly" if entry.get("PayBasis") == "ANNUAL" else entry.get("PayBasis"),
-                "FullTimeEquivalent": 1,
-                "ChangeReason": entry.get("ChangeReason"),
-                "NextIncrementDate": entry.get("NextIncrementDate"),
-                "TimesheetLocation": entry.get("TimesheetLocation"),
-                "TimesheetLunchDuration": None if entry.get("TimesheetLunchDuration") is not None else entry.get("TimesheetLunchDuration"),
-                "ExpenseSubmissionFrequency": entry.get("ExpenseSubmissionFrequency") if entry.get("ExpenseSubmissionFrequency") !="" else None,
-                "CostCentre": entry.get("CostCentre") if entry.get("CostCentre") != "" else None,
-                "JobFamily": entry.get("JobFamily"),
-                "ApprenticeUnder25": entry.get("ApprenticeUnder25"),
-                "ApprenticeshipEndDate": convert_datetime_to_date(entry["ApprenticeshipEndDate"]) if entry["ApprenticeshipEndDate"] is not None else None,
-                "ContractEndDate": convert_datetime_to_date(entry["ContractEndDate"]) if entry["ContractEndDate"] is not None else None,
-                "NormalHours": entry.get("NormalHours"),
-                "RealTimeInformationIrregularFrequency": entry.get("RealTimeInformationIrregularFrequency") if entry.get("RealTimeInformationIrregularFrequency") !="" else None,
-                "NoticePeriod": entry.get("NoticePeriod"),
-                "Id": entry.get("Id"),
-                }
-        for entry in combined_data
+            {
+            "JobTitle": entry.get("JobTitle"),
+            "Classification": entry.get("Classification"),
+            "StartDate": convert_datetime_to_date(entry["StartDate"]) if entry["StartDate"] is not None else None,
+            "EndDate": convert_datetime_to_date(entry["EndDate"]) if entry["EndDate"] is not None else None,
+            "WorkingCalendar": "40hrs Monday to friday",                                        #entry.get("WorkingCalendar"),
+            "LineManagerId": entry.get("LineManagerId"),
+            "HierarchyNodeId": entry.get("HierarchyNodeId"),
+            "Active": entry.get("Active"),
+            "Salary": float(Decimal(entry.get("Salary", 0.0) or 0.0).quantize(Decimal("0.00"), rounding=ROUND_HALF_UP)),
+            "EmployeeId": entry.get("EmployeeId"),
+            "Contract": "Permenent",                                        #Needs to be changed once the updating is sorted
+            "PayFrequency": "Biweekly" if entry.get("PayFrequency") == "Fortnightly" else entry.get("PayFrequency"),
+            "PayBasis": "Yearly" if entry.get("PayBasis") == "ANNUAL" else entry.get("PayBasis"),
+            "FullTimeEquivalent": 1,
+            "ChangeReason": entry.get("ChangeReason"),
+            "NextIncrementDate": entry.get("NextIncrementDate"),
+            "TimesheetLocation": entry.get("TimesheetLocation"),
+            "TimesheetLunchDuration": None if entry.get("TimesheetLunchDuration") is not None else entry.get("TimesheetLunchDuration"),
+            "ExpenseSubmissionFrequency": entry.get("ExpenseSubmissionFrequency") if entry.get("ExpenseSubmissionFrequency") !="" else None,
+            "CostCentre": entry.get("CostCentre") if entry.get("CostCentre") != "" else None,
+            "JobFamily": entry.get("JobFamily"),
+            "ApprenticeUnder25": entry.get("ApprenticeUnder25"),
+            "ApprenticeshipEndDate": convert_datetime_to_date(entry["ApprenticeshipEndDate"]) if entry["ApprenticeshipEndDate"] is not None else None,
+            "ContractEndDate": convert_datetime_to_date(entry["ContractEndDate"]) if entry["ContractEndDate"] is not None else None,
+            "NormalHours": entry.get("NormalHours"),
+            "RealTimeInformationIrregularFrequency": entry.get("RealTimeInformationIrregularFrequency") if entry.get("RealTimeInformationIrregularFrequency") !="" else None,
+            "NoticePeriod": entry.get("NoticePeriod"),
+            "Id": entry.get("Id"),
+            }
+        for entry in cascade_current_jobs
     ]
 
     for record in cascade_reordered:
@@ -1681,12 +1758,8 @@ def cascade_rejig_jobs(cascade_current_jobs):
 
     filtered_records = list(most_recent_records.values())
 
-
-
     if Data_export:
-        file_path = os.path.join(data_store,"004 - Jobs to Cascade","002 - Cascade_reordered.json")
-        with open(file_path, "w") as json_file:
-            json.dump(filtered_records, json_file, indent=4)
+        export_data("004 - Jobs to Cascade","002 - Cascade_reordered.json", filtered_records)    
 
     return filtered_records
 
@@ -1694,181 +1767,87 @@ def adp_rejig(cascade_current,adp_responses,ID_library):
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Faffling about with the Jobs info to upload to Cascade (" + time_now + ")")
 
-
     transformed_records = []        
-    records_contained = []
+    records_to_add = []
+    new_start_jobs = []
 
-    for record in adp_responses:
+    for worker in adp_responses:
+        active_job_position = find_active_job_position(worker)
+       
+        jobTitle = worker["workAssignments"][active_job_position].get("jobTitle")
+        paybasis_hourly = worker.get("workAssignments", [{}])[active_job_position].get("baseRemuneration", {}).get("hourlyRateAmount", {}).get("nameCode", {}).get("shortName", None)
+        pay_hourly = worker.get("workAssignments", [{}])[active_job_position].get("baseRemuneration", {}).get("hourlyRateAmount", {}).get("amountValue", None)
+        pay_annual = worker.get("workAssignments", [{}])[active_job_position].get("baseRemuneration", {}).get("annualRateAmount", {}).get("amountValue", None)
+        effective_date_wage = worker.get("workAssignments", [{}])[active_job_position].get("baseRemuneration", {}).get("effectiveDate")
+        effective_date_other = worker.get("workAssignments", [{}])[active_job_position].get("assignmentStatus", {}).get("effectiveDate")
+        pay_frequency = worker.get("workAssignments", [{}])[active_job_position].get("payCycleCode", {}).get("shortName", None)    
+        ADP_id = worker["workAssignments"][active_job_position]["positionID"]
+        LM_AOID = worker['workAssignments'][active_job_position].get('reportsTo',[{}])[0].get("associateOID",None)
 
-        workers = record["workers"]
-        for worker in workers:
-            work_assignments = worker.get("workAssignments", [{}])
+        contract                    = find_contract(c,worker,active_job_position)
+        employee_id,hierarchy_id    = search_ID_lib(ID_library,ADP_id)
+        line_manager                = find_line_manager(ID_library,LM_AOID,employee_id)
+        paybasis                    = choose_paybasis(paybasis_hourly)
+        salary,salary_rounded       = round_salary(pay_hourly,pay_annual)     
+        contract                    = change_contract_language(contract)
 
-            active_job_position = None
+        for record in cascade_current:
+            if record.get("EmployeeId") == employee_id:
+                Id = record.get("Id")
+                jobTitle = record.get("JobTitle")
+                JobFamily = record.get("JobFamily")
+                cascadeStart = record.get("StartDate")
+                notice = record.get("NoticePeriod")
+                classification = record.get("Classification")
 
-            for index, assignment in enumerate(work_assignments):
-                if assignment.get("primaryIndicator", True):
-                    active_job_position = index
-                    continue
-            
-            jobTitle = worker["workAssignments"][active_job_position].get("jobTitle")
-            hireDate = worker["workAssignments"][active_job_position].get("actualStartDate")
-            paybasis_hourly = worker.get("workAssignments", [{}])[active_job_position].get("baseRemuneration", {}).get("hourlyRateAmount", {}).get("nameCode", {}).get("shortName", None)
-            paybasis_annual = worker.get("workAssignments", [{}])[active_job_position].get("baseRemuneration", {}).get("annualRateAmount", {}).get("nameCode", {}).get("shortName", None)
-            pay_hourly = worker.get("workAssignments", [{}])[active_job_position].get("baseRemuneration", {}).get("hourlyRateAmount", {}).get("amountValue", None)
-            pay_annual = worker.get("workAssignments", [{}])[active_job_position].get("baseRemuneration", {}).get("annualRateAmount", {}).get("amountValue", None)
-            additional_pay_hourly = (
-                worker.get("workAssignments", [{}])[0]
-                .get("additionalRemunerations", [{}])[0]
-                .get("rate", {})
-                .get("amountValue")
-                )
-            effective_date_wage = worker.get("workAssignments", [{}])[active_job_position].get("baseRemuneration", {}).get("effectiveDate")
-            effective_date_other = worker.get("workAssignments", [{}])[active_job_position].get("assignmentStatus", {}).get("effectiveDate")
+                effective_date_other = worker.get("workAssignments", [{}])[active_job_position].get("assignmentStatus", {}).get("effectiveDate")
+                startDate = find_start_date(effective_date_wage,cascadeStart,effective_date_other)
+                changeReason = find_change_reason(record,salary,hierarchy_id,line_manager,startDate)
 
-            pay_frequency = worker.get("workAssignments", [{}])[active_job_position].get("payCycleCode", {}).get("shortName", None)
-            home_units = worker["workAssignments"][active_job_position].get("homeOrganizationalUnits", [{}])
-            if len(home_units) == 2:
-                adp_hierarchy = home_units[1].get("nameCode", {}).get("codeValue", "")
-            else:
-                adp_hierarchy = home_units[0].get("nameCode", {}).get("codeValue", "")
-            if c == "usa":
-                contract = worker["workAssignments"][active_job_position]["workerGroups"][0]["groupCode"].get("codeValue","")
-            else:
-                contract = worker["workAssignments"][active_job_position]["workerTypeCode"].get("codeValue","")                
-            ADP_id = worker["workAssignments"][active_job_position]["positionID"]
-            LM_AOID = worker['workAssignments'][active_job_position].get('reportsTo',[{}])[0].get("associateOID",None)
-
-            for record in ID_library:
-                if record["ADP_number"]==ADP_id:
-                    employee_id = record["Cascade_full"]
-                    hierarchy_id = record["Hierarchy"]
-
-            for record in ID_library:
-                if record["AOID"]==LM_AOID:
-                    line_manager = record["Cascade_full"]
-            
-            file_path = os.path.join(current_folder,"Hierarchy.xlsx")
-            df = pd.read_excel(file_path, sheet_name='JJ')
-            reports_to_JJ = df['ID'].tolist()
-            if employee_id in reports_to_JJ:
-                line_manager = "b3775d20-8d33-4ca9-aaad-5e2346bb17e9"
-            else:
-                line_manager = line_manager
-
-            if paybasis_hourly is not None:
-                paybasis = "Hourly"
-            elif paybasis_annual is not None:
-                paybasis = "Yearly"
-            else:
-                continue                
-
-            if pay_hourly is not None:
-                salary = float(pay_hourly)
-            else:
-                salary = float(pay_annual)
-            
-            salary_rounded = round(salary,2)
-
-            if contract == "Full Time":
-                contract = "Permenent"
-            elif contract == "FT":
-                contract = "Permenent"
-            elif contract == "Regular Full-Time":
-                contract = "Permenent"
-            else:
-                contract = "Temporary"
-
-            for record in cascade_current:
-                if record.get("EmployeeId") == employee_id:
-                    Id = record.get("Id")
-                    jobTitle = record.get("JobTitle")
-                    JobFamily = record.get("JobFamily")
-                    cascadeStart = record.get("StartDate")
-                    notice = record.get("NoticePeriod")
-                    classification = record.get("Classification")
-
-                    wage = datetime.strptime(effective_date_wage, "%Y-%m-%d")
-                    cascade = datetime.strptime(cascadeStart, "%Y-%m-%d")
-                    other = datetime.strptime(effective_date_other, "%Y-%m-%d")
-
-                    startDate = max(wage, cascade, other)
-                    startDate = startDate.strftime("%Y-%m-%d")
-
-                    effective_date_other = worker.get("workAssignments", [{}])[active_job_position].get("assignmentStatus", {}).get("effectiveDate")
-
-                    if str(record.get("Salary")) != str(salary):
-                        ChangeReason = "Change of Salary"
-                    elif str(record.get("HierarchyNodeId")) != str(hierarchy_id):
-                        ChangeReason = "Change of Position"
-                    elif str(record.get("LineManagerId")) != str(line_manager):
-                        ChangeReason = "Change of Manager"
-                    elif str(record.get("StartDate")) != str(startDate):
-                        ChangeReason = "Minor Change/Correction"
-                    else:
-                        ChangeReason = record.get("ChangeReason")
-
-                    transformed_record = {
-                        "JobTitle": jobTitle,
-                        "Classification": classification,
-                        "StartDate": startDate,                  
-                        "EndDate": None,
-                        "WorkingCalendar": "40hrs Monday to friday", 
-                        "LineManagerId": line_manager,
-                        "HierarchyNodeId": hierarchy_id,
-                        "Active": True,
-                        "Salary": salary_rounded,
-                        "EmployeeId": employee_id,
-                        "Contract": contract,
-                        "PayFrequency": pay_frequency,
-                        "PayBasis": paybasis,
-                        "FullTimeEquivalent": 1,                                                    #This is likely to change once working patterns in the US are described.
-                        "ChangeReason": ChangeReason,        
-                        "NextIncrementDate": None,
-                        "TimesheetLocation": None,
-                        "TimesheetLunchDuration": None,
-                        "ExpenseSubmissionFrequency": None,
-                        "CostCentre": None,
-                        "JobFamily": JobFamily,
-                        "ApprenticeUnder25": None,
-                        "ApprenticeshipEndDate": None,
-                        "ContractEndDate": None,
-                        "NormalHours": 40,
-                        "RealTimeInformationIrregularFrequency": None,
-                        "NoticePeriod": notice,
-                        "Id": Id                            
-                        }
-                
-                    records_to_add = {
-                        "EmployeeId": employee_id,
+                transformed_record = {
+                    "JobTitle": jobTitle,
+                    "Classification": classification,
+                    "StartDate": startDate,                  
+                    "EndDate": None,
+                    "WorkingCalendar": "40hrs Monday to friday", 
+                    "LineManagerId": line_manager,
+                    "HierarchyNodeId": hierarchy_id,
+                    "Active": True,
+                    "Salary": salary_rounded,
+                    "EmployeeId": employee_id,
+                    "Contract": contract,
+                    "PayFrequency": pay_frequency,
+                    "PayBasis": paybasis,
+                    "FullTimeEquivalent": 1,                                                    #This is likely to change once working patterns in the US are described.
+                    "ChangeReason": changeReason,        
+                    "NextIncrementDate": None,
+                    "TimesheetLocation": None,
+                    "TimesheetLunchDuration": None,
+                    "ExpenseSubmissionFrequency": None,
+                    "CostCentre": None,
+                    "JobFamily": JobFamily,
+                    "ApprenticeUnder25": None,
+                    "ApprenticeshipEndDate": None,
+                    "ContractEndDate": None,
+                    "NormalHours": 40,
+                    "RealTimeInformationIrregularFrequency": None,
+                    "NoticePeriod": notice,
+                    "Id": Id                            
                     }
+            
+                record_to_add = {
+                    "EmployeeId": employee_id,
+                }
 
-
-                    transformed_records.append(transformed_record)
-                    records_contained.append(records_to_add)
+                transformed_records.append(transformed_record)
+                records_to_add.append(record_to_add)
                 
-    if Data_export:
-        file_path = os.path.join(data_store,"004 - Jobs to Cascade","003a - ADP_reordered (Staff with roles).json")
-        with open(file_path, "w") as json_file:
-            json.dump(transformed_records, json_file, indent=4)
-
-        file_path = os.path.join(data_store,"004 - Jobs to Cascade","003b - ADP_reordered (Staff with roles - Id).json")
-        with open(file_path, "w") as json_file:
-            json.dump(records_contained, json_file, indent=4)
-
-    employee_ids = {record["EmployeeId"] for record in records_contained}
-
-    new_start_jobs = [
-        {"AOID":entry["AOID"]}
-        for entry in ID_library
-        if entry["Cascade_full"] not in employee_ids
-    ]
+    new_start_jobs = find_new_starters(records_to_add,ID_library)
 
     if Data_export:
-        file_path = os.path.join(data_store,"004 - Jobs to Cascade","003c - ADP_reordered (New Starters).json")
-        with open(file_path, "w") as json_file:
-            json.dump(new_start_jobs, json_file, indent=4)
-
+        export_data("004 - Jobs to Cascade","003a - ADP_reordered (Staff with roles).json", transformed_records)    
+        export_data("004 - Jobs to Cascade","003b - ADP_reordered (Staff with roles - Id).json", records_to_add)    
+        export_data("004 - Jobs to Cascade","003c - ADP_reordered (New Starters).json",new_start_jobs)
                 
     return transformed_records,new_start_jobs   
 
@@ -1890,117 +1869,59 @@ def adp_rejig_new_starters(new_starters,adp_responses,ID_library):
             response["workers"] = filtered_workers
             new_start.append(response)
 
-    for record in new_start:
+    for worker in new_start:
+        active_job_position = find_active_job_position(worker)
+       
+        jobTitle = worker["workAssignments"][active_job_position].get("jobTitle")
+        paybasis_hourly = worker.get("workAssignments", [{}])[active_job_position].get("baseRemuneration", {}).get("hourlyRateAmount", {}).get("nameCode", {}).get("shortName", None)
+        pay_hourly = worker.get("workAssignments", [{}])[active_job_position].get("baseRemuneration", {}).get("hourlyRateAmount", {}).get("amountValue", None)
+        pay_annual = worker.get("workAssignments", [{}])[active_job_position].get("baseRemuneration", {}).get("annualRateAmount", {}).get("amountValue", None)
+        hireDate = worker.get("workAssignments", [{}])[active_job_position].get("baseRemuneration", {}).get("effectiveDate")
+        pay_frequency = worker.get("workAssignments", [{}])[active_job_position].get("payCycleCode", {}).get("shortName", None)    
+        ADP_id = worker["workAssignments"][active_job_position]["positionID"]
+        LM_AOID = worker['workAssignments'][active_job_position].get('reportsTo',[{}])[0].get("associateOID",None)
 
-        workers = record["workers"]
-        for worker in workers:
-            work_assignments = worker.get("workAssignments", [{}])
+        contract                    = (c,worker,active_job_position)
+        employee_id,hierarchy_id    = search_ID_lib(ID_library,ADP_id)
+        line_manager                = find_line_manager(ID_library,LM_AOID,employee_id)
+        paybasis                    = choose_paybasis(paybasis_hourly)
+        salary,salary_rounded       = round_salary(pay_hourly,pay_annual)     
+        contract                    = change_contract_language(contract)
 
-            active_job_position = None
+        transformed_record = {
+            "JobTitle": jobTitle,
+            "Classification": None,
+            "StartDate": hireDate,                  
+            "EndDate": None,
+            "WorkingCalendar": "40hrs Monday to friday", 
+            "LineManagerId": line_manager,
+            "HierarchyNodeId": hierarchy_id,
+            "Active": True,
+            "Salary": salary_rounded,
+            "EmployeeId": employee_id,
+            "Contract": contract,
+            "PayFrequency": pay_frequency,
+            "PayBasis": paybasis,
+            "FullTimeEquivalent": 1,                                                    #This is likely to change once working patterns in the US are described.
+            "ChangeReason": "New Starter",        
+            "NextIncrementDate": None,
+            "TimesheetLocation": None,
+            "TimesheetLunchDuration": None,
+            "ExpenseSubmissionFrequency": None,
+            "CostCentre": None,
+            "JobFamily": None,
+            "ApprenticeUnder25": None,
+            "ApprenticeshipEndDate": None,
+            "ContractEndDate": None,
+            "NormalHours": 40,
+            "RealTimeInformationIrregularFrequency": None,
+            "NoticePeriod": None,
+        }
 
-            for index, assignment in enumerate(work_assignments):
-                if assignment.get("primaryIndicator", True):
-                    active_job_position = index
-                    continue
-
-            #classification = worker["workAssignments"][active_job_position].get("occupationalClassifications", [{}])[0].get("classificationCode", {}).get("longName") or worker["workAssignments"][active_job_position].get("occupationalClassifications", [{}])[0].get("classificationCode", {}).get("shortName")
-            jobTitle = worker["workAssignments"][active_job_position].get("jobTitle")
-            hireDate = worker["workAssignments"][active_job_position].get("actualStartDate")
-            paybasis_hourly = worker.get("workAssignments", [{}])[active_job_position].get("baseRemuneration", {}).get("hourlyRateAmount", {}).get("nameCode", {}).get("shortName", None)
-            paybasis_annual = worker.get("workAssignments", [{}])[active_job_position].get("baseRemuneration", {}).get("annualRateAmount", {}).get("nameCode", {}).get("shortName", None)
-            pay_hourly = worker.get("workAssignments", [{}])[active_job_position].get("baseRemuneration", {}).get("hourlyRateAmount", {}).get("amountValue", None)
-            pay_annual = worker.get("workAssignments", [{}])[active_job_position].get("baseRemuneration", {}).get("annualRateAmount", {}).get("amountValue", None)
-            additional_pay_hourly = (
-                worker.get("workAssignments", [{}])[0]
-                .get("additionalRemunerations", [{}])[0]
-                .get("rate", {})
-                .get("amountValue")
-                )            
-            effective_date = worker.get("workAssignments", [{}])[active_job_position].get("baseRemuneration", {}).get("effectiveDate")
-            pay_frequency = worker.get("workAssignments", [{}])[active_job_position].get("payCycleCode", {}).get("shortName", None)
-            home_units = worker["workAssignments"][active_job_position].get("homeOrganizationalUnits", [{}])
-            if len(home_units) == 2:
-                adp_hierarchy = home_units[1].get("nameCode", {}).get("codeValue", "")
-            else:
-                adp_hierarchy = home_units[0].get("nameCode", {}).get("codeValue", "")
-            if c == "usa":
-                contract = worker["workAssignments"][active_job_position]["workerGroups"][0]["groupCode"].get("codeValue","")
-            else:
-                contract = worker["workAssignments"][active_job_position]["workerTypeCode"].get("codeValue","")
-            ADP_id = worker["workAssignments"][active_job_position]["positionID"]
-            LM_AOID = worker['workAssignments'][active_job_position].get('reportsTo',[{}])[0].get("associateOID",None)
-        
-            for record in ID_library:
-                if record["ADP_number"]==ADP_id:
-                    employee_id = record["Cascade_full"]
-                    hierarchy_id = record["Hierarchy"]              
-
-            for record in ID_library:
-                if record["AOID"]==LM_AOID:
-                    line_manager = record["Cascade_full"]
-
-            file_path = os.path.join(current_folder,"Hierarchy.xlsx")
-            df = pd.read_excel(file_path, sheet_name='JJ')
-            reports_to_JJ = df['ID'].tolist()
-            if employee_id in reports_to_JJ:
-                line_manager = "b3775d20-8d33-4ca9-aaad-5e2346bb17e9"
-            else:
-                line_manager = line_manager
-
-            if paybasis_hourly is not None:
-                paybasis = "Hourly"
-            else:
-                paybasis = "Yearly"
-
-            if pay_hourly is not None:
-                salary = pay_hourly
-            else:
-                salary = pay_annual
-
-            
-            if contract == "Regular Full-Time":
-                contract = "Permenant"
-            elif contract =="FT":
-                contract = "Permenant"
-            else:
-                contract = "Temporary"
-    
-            transformed_record = {
-                "JobTitle": jobTitle,
-                "Classification": None,
-                "StartDate": hireDate,                  
-                "EndDate": None,
-                "WorkingCalendar": "40hrs Monday to friday", 
-                "LineManagerId": line_manager,
-                "HierarchyNodeId": hierarchy_id,
-                "Active": True,
-                "Salary": salary,
-                "EmployeeId": employee_id,
-                "Contract": contract,
-                "PayFrequency": pay_frequency,
-                "PayBasis": paybasis,
-                "FullTimeEquivalent": 1,                                                    #This is likely to change once working patterns in the US are described.
-                "ChangeReason": "New Starter",        
-                "NextIncrementDate": None,
-                "TimesheetLocation": None,
-                "TimesheetLunchDuration": None,
-                "ExpenseSubmissionFrequency": None,
-                "CostCentre": None,
-                "JobFamily": None,
-                "ApprenticeUnder25": None,
-                "ApprenticeshipEndDate": None,
-                "ContractEndDate": None,
-                "NormalHours": 40,
-                "RealTimeInformationIrregularFrequency": None,
-                "NoticePeriod": None,
-            }
-
-            transformed_records.append(transformed_record)
+        transformed_records.append(transformed_record)
 
     if Data_export:
-        file_path_out = os.path.join(data_store, "004 - Jobs to Cascade", "004d - New Starter Jobs.json")
-        with open(file_path_out, 'w') as output_file:
-            json.dump(transformed_records, output_file, indent=2)
+        export_data("004 - Jobs to Cascade","004d - New Starter Jobs.json", transformed_records)    
 
     return transformed_records
                         
@@ -2043,18 +1964,9 @@ def classify_adp_files(new_start_jobs,adp_current,cascade_current):
     print ()
 
     if Data_export:
-        no_update_jobs_path = os.path.join(data_store, "004 - Jobs to Cascade", "005a - No update needed.json")
-        update_jobs_path = os.path.join(data_store, "004 - Jobs to Cascade", "005b - update current jobs.json")
-        add_jobs_path = os.path.join(data_store, "004 - Jobs to Cascade", "005c - add job line.json")
-        
-        with open(no_update_jobs_path, 'w') as update_file:
-            json.dump(not_to_be_updated, update_file, indent=2)
-
-        with open(update_jobs_path, 'w') as update_file:
-            json.dump(PUT_jobs, update_file, indent=2)
-        
-        with open(add_jobs_path, 'w') as add_file:
-            json.dump(POST_jobs, add_file, indent=2)
+        export_data("004 - Jobs to Cascade","005a - No update needed.json", not_to_be_updated)    
+        export_data("004 - Jobs to Cascade","005b - update current jobs.json", PUT_jobs)    
+        export_data("004 - Jobs to Cascade","005c - add job line.json", POST_jobs)    
 
     return PUT_jobs, POST_jobs
 
@@ -2090,10 +2002,12 @@ def PUT_update_job_change(PUT_jobs):
         "NormalHours": record["NormalHours"],
         "RealTimeInformationIrregularFrequency": record["RealTimeInformationIrregularFrequency"],
         "NoticePeriod": record["NoticePeriod"],
-        "Id": record["Id"]
-        }
+        "Id": record["Id"]}
+
         Id = record["Id"]
         employeeId = record["EmployeeId"]
+
+        full_name = find_name(employeeId)
 
         api_base = 'https://api.iris.co.uk/hr/v2/jobs/'
         api_url = api_base + Id      
@@ -2107,10 +2021,10 @@ def PUT_update_job_change(PUT_jobs):
         response = requests.put(api_url, headers=headers, json=update_record)
         
         if response.status_code == 204:
-            print("        " + f'Current Job updated for {employeeId} complete')
+            print("        " + f'Current Job updated for {full_name} complete')
         else:
-            print("        "+f'Data Transfer for {employeeId} has failed. Response Code: {response.status_code}')           
-        time.sleep(0.76)
+            print("        "+f'Data Transfer for {full_name} has failed. Response Code: {response.status_code}')           
+        time.sleep(0.6)
 
 def POST_create_jobs(POST_jobs, new_start_jobs):
                 
@@ -2149,6 +2063,8 @@ def POST_create_jobs(POST_jobs, new_start_jobs):
             }
             employeeId = record["EmployeeId"]
 
+            full_name = find_name(employeeId)
+
             api_url = 'https://api.iris.co.uk/hr/v2/jobs'
 
             headers = {
@@ -2161,24 +2077,21 @@ def POST_create_jobs(POST_jobs, new_start_jobs):
             response = requests.post(api_url, headers=headers, json=update_record)
             
             if response.status_code == 201:
-                print("        " + f'New Job line added for {employeeId} complete')
+                print("        " + f'New Job line added for {full_name} complete')
             else:
-                print("        "+f'Data Transfer for {employeeId} has failed. Response Code: {response.status_code}')           
-            time.sleep(0.76)
+                print("        "+f'Data Transfer for {full_name} has failed. Response Code: {response.status_code}')           
+            time.sleep(0.6)
 
+#----------------------------------------------------------------------------------#
 #----------------------------------------------------------------------------------# 
+
 if __name__ == "__main__":
 
     if testing is False:
         delete_folders()                                #clears out at the start of every run. Can be recreated if needed
         time.sleep(1)
 
-    global country,creds,project_Id,storage_client
-
     extended_update,Data_export = debug_check(debug)
-
-    run_type = find_run_type()
-    run_type = 1                         #Comment this out in the production version
 
     creds, project_Id = google_auth()
 
@@ -2193,44 +2106,42 @@ if __name__ == "__main__":
         global Data_export, data_store,country_hierarchy_USA, country_hierarchy_CAN
         
         data_store = data_store_location(c)
-
         client_id, client_secret, strings_to_exclude, country_hierarchy_USA, country_hierarchy_CAN, cascade_API_id, keyfile, certfile = load_keys(c)
-
         certfile, keyfile = load_ssl(certfile, keyfile)
-
         access_token = adp_bearer(client_id,client_secret,certfile,keyfile)
         cascade_token = cascade_bearer (cascade_API_id)
 
+        '''cascade_api_headers = {
+            'Authorization': f'Bearer {cascade_token}',
+        }'''
         
         #----------     Global Data Calls     ----------#
         time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print ("    Making global calls (" + time_now + ")")
         
-        global adp_responses,cascade_responses,hierarchy_nodes                              #Remove this after rebuilding ID Library Code
-
         if testing:
+            global adp_responses,adp_terminated,cascade_responses,hierarchy_nodes,ID_library                              
             load("002 - Security and Global","001 - ADP (Data Out - active).json","adp_responses")
+            load("002 - Security and Global","001 - ADP (Data Out - terminated).json","adp_terminated")
             load("002 - Security and Global","001 - Cascade Raw Out.json","cascade_responses")
             load("002 - Security and Global","002 - Hierarchy Nodes.json","hierarchy_nodes")
-            
+            load("002 - Security and Global","003 - ID_library.json","ID_library")
+
         else:
-            adp_responses, adp_terminated, adp_leave    = GET_workers_adp()
-            cascade_responses                           = GET_workers_cascade()
-            hierarchy_nodes                             = GET_hierarchy_list(c)
-        
-        ID_library                                  = ID_generator(c,adp_responses,hierarchy_nodes)
-        sys.exit()
+            adp_responses, adp_leave, adp_terminated   = GET_workers_adp()
+            cascade_responses                          = GET_workers_cascade()
+            hierarchy_nodes                            = GET_hierarchy_list(c)
+            ID_library                                 = ID_generator(c,adp_responses)
+
         #----------     Push New Cascade Id's back to Cascade     ----------#
         if run_type == 1:
-            
             time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             print ("    Pushing Cascade Id's back to ADP (" + time_now + ")")
 
-            CascadeId_to_upload             = whats_in_ADP(adp_responses, ID_library)
+            CascadeId_to_upload             = whats_in_ADP(adp_responses, ID_library,c)
             upload_cascade_Ids_to_ADP(CascadeId_to_upload,c)
 
         #----------     Delete removed Absences     ----------#
-
         elif run_type in [2, 5]:
             all_absences = []
 
@@ -2284,10 +2195,8 @@ if __name__ == "__main__":
             time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             print ("    Updating personal details on Cascade (" + time_now + ")")
 
-            if c == "can":
-                terminations = load_csv_from_bucket("CAN_termination_mapping")
-            elif c == "usa":
-                terminations = load_csv_from_bucket("USA_termination_mapping")
+            countryName = c.upper()
+            terminations = load_csv_from_bucket(f"{countryName}_termination_mapping")
 
             adp_to_cascade                                              = convert_adp_to_cascade_form(adp_responses,"all",terminations,ID_library)
             adp_to_cascade_terminated                                   = convert_adp_to_cascade_form(adp_terminated,"terminated",terminations,ID_library,x_months_ago)
@@ -2301,12 +2210,11 @@ if __name__ == "__main__":
         #----------     Update Job Data     ----------#
         
         elif run_type == 4:
-            
             time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             print ("    Updating Job details on Cascade (" + time_now + ")")
             
-            cascade_current_jobs                = cascade_current_workers()
-            cascade_current                     = cascade_rejig_jobs(cascade_current_jobs)
+            cascade_jobs                        = cascade_current_jobs()
+            cascade_current                     = cascade_rejig_jobs(cascade_jobs)
             adp_current,new_starters_jobs       = adp_rejig(cascade_current,adp_responses,ID_library)
             new_start_jobs                      = adp_rejig_new_starters(new_starters_jobs,adp_responses,ID_library)
             PUT_jobs, POST_jobs                 = classify_adp_files(new_start_jobs,adp_current,cascade_current)
@@ -2318,9 +2226,11 @@ if __name__ == "__main__":
 
         ID_library = []
 
-
     countries = ["usa","can"]
-    #countries = [ "usa"]           #Use to test Country independently)
+    #countries = [ "can"]           #Use to test Country independently)
+
+    run_type = find_run_type()
+    run_type = 1                         #Comment this out in the production version
 
     for c in countries:
         country_choice (c,run_type)
