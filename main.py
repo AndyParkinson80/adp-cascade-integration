@@ -31,7 +31,6 @@ from google.cloud import storage
 
 debug = False
 testing = False
-#Data_export = False
 
 current_folder = Path(__file__).resolve().parent
 
@@ -176,8 +175,6 @@ def debug_check(debug):
     else:
         extended_update = True                                                            
         Data_export = False
-        if testing is False:
-            create_folders(current_folder)
                     
     return extended_update,Data_export
 
@@ -2230,7 +2227,7 @@ if __name__ == "__main__":
     #countries = [ "can"]           #Use to test Country independently)
 
     run_type = find_run_type()
-    run_type = 1                         #Comment this out in the production version
+    #run_type = 1                         #Comment this out in the production version
 
     for c in countries:
         country_choice (c,run_type)
