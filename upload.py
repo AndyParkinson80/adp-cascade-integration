@@ -29,8 +29,6 @@ with tempfile.NamedTemporaryFile(mode="w+", delete=False) as temp_file:
     temp_file.flush()
     SERVICE_ACCOUNT_PATH = temp_file.name
 
-
-
 # Step 2: Package source code
 def create_tarball():
     print("📦 Creating tarball with Python tarfile module...")
