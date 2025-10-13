@@ -313,8 +313,6 @@ def api_call(page_size,skip_param,api_url,api_headers,type):
 
 def api_count_cascade(api_response,page_size):
     response_data = api_response.json()
-    print (response_data)
-    input("-!-")
     total_number = response_data['@odata.count']
     api_calls = math.ceil(total_number / page_size)
 
@@ -1046,7 +1044,7 @@ def POST(new_records,adp_response,Cascade_full):
 
             output.append(new_record)
                                     
-            response = api_call_cascade(cascade_token,cascade_absences,None,new_record)
+            response = api_call_cascade(cascade_token,cascade_absences_url,None,new_record)
             json_response = response.json()
 
             trackingID = json_response.get("id")
@@ -1130,7 +1128,7 @@ def run_type_2():
                 new_records, Update_transformed, delete_ids, update_ids = combine_json_files_for_POST(current_absence_id_cascade,adp_current,cascade_current)  # Compares adp and cascade and removes any that are already in cascade
 
             DELETE(delete_ids)  # Deletes cancelled absences'''
-            if run_type == 5:
+            if run_type_flag:
                 POST(new_records,adp_response,Cascade_full)  # Creates new absences
 
         except json.JSONDecodeError as e:
@@ -2128,7 +2126,7 @@ if __name__ == "__main__":
         print (f"Synchronizing country: {c}")                                           #c represents country. Either USA or CAN
 
         global access_token, cascade_token, certfile, keyfile, strings_to_exclude, extended_update
-        global Data_export, data_store,country_hierarchy_USA, country_hierarchy_CAN
+        global Data_export, data_store,country_hierarchy_USA, country_hierarchy_CAN,run_type_flag
         
         data_store = data_store_location(c)
         client_id, client_secret, strings_to_exclude, country_hierarchy_USA, country_hierarchy_CAN, cascade_API_id, keyfile, certfile = load_keys(c)
@@ -2158,6 +2156,7 @@ if __name__ == "__main__":
 
         if run_type in allowed_run_types:
             if run_type == 5:
+                run_type_flag = True
                 run_type = 2
 
             # Construct function name dynamically
@@ -2178,7 +2177,7 @@ if __name__ == "__main__":
     #countries = ["can"]           #Use to test Country independently)
 
     run_type = find_run_type()
-    #run_type = 3                         #Comment this out in the production version
+    #run_type = 5                        #Comment this out in the production version
 
     for c in countries:
         country_choice (c,run_type)
