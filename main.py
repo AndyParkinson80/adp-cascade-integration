@@ -48,13 +48,14 @@ def find_run_type():
     
     current_time = datetime.now().time()
 
+    #Triggers on GCP are set for hour and half hour. i.e. Jobs Update (RT 4) runs at 03:30 so trigger at 3:16 - 3:45 to allow for lag
     time_ranges = [
-        (dt_time(0, 0), dt_time(0, 10), 1),    # Push New Cascade Id's back to Cascade
-        (dt_time(0, 30), dt_time(0, 40), 2),   # Delete removed Absences
-        (dt_time(1, 0), dt_time(1, 10), 3),    # Updates staff personal and adds new staff
-        (dt_time(3, 0), dt_time(3, 10), 1),    # Push New Cascade Id's back to Cascade (Pushes ID for new Staff)
-        (dt_time(3, 30), dt_time(3, 40), 4),   # Updates job details
-        (dt_time(4, 0), dt_time(4, 10), 5),    # Adds in new and changed Absences
+        (dt_time(23, 45), dt_time(0, 15), 1),       # Push New Cascade Id's back to Cascade (00:00)
+        (dt_time(0, 16), dt_time(0, 45), 2),        # Delete removed Absences (00:30)
+        (dt_time(0, 46), dt_time(1, 15), 3),        # Updates staff personal and adds new staff (01:00)
+        (dt_time(2, 45), dt_time(3, 15), 1),        # Push New Cascade Id's back to Cascade (Pushes ID for new Staff) (03:00)
+        (dt_time(3, 16), dt_time(3, 45), 4),        # Updates job details (03:30)
+        (dt_time(3, 46), dt_time(4, 15), 5),        # Adds in new and changed Absences (04:00)
     ]
 
     # Find matching time range
