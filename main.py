@@ -10,6 +10,7 @@ from pathlib import Path
 # Standard Library - Time/Date
 import time
 from datetime import datetime, timedelta,time as dt_time
+from zoneinfo import ZoneInfo
 
 # Standard Library - Data Processing
 import csv
@@ -29,7 +30,7 @@ from google.oauth2 import service_account
 from google.cloud import secretmanager
 from google.cloud import storage
 
-debug = True
+debug = False
 testing = False
 
 current_folder = Path(__file__).resolve().parent
@@ -46,10 +47,23 @@ cascade_absencedays = 'https://api.iris.co.uk/hr/v2/attendance/absencedays'
 
 def find_run_type():
     
-    current_time = datetime.now().time()
+    now_uk = datetime.now(ZoneInfo("Europe/London"))
+    is_bst = bool(now_uk.dst())
+    #is_bst = False
 
-    #Triggers on GCP are set for hour and half hour. i.e. Jobs Update (RT 4) runs at 03:30 so trigger at 3:16 - 3:45 to allow for lag
-    time_ranges = [
+    print("Current UK time:", now_uk)
+    print("BST active?", is_bst)
+    
+    # Get the current UK time (not system time)
+    current_time = now_uk.time()
+    #current_time = dt_time(5,0,5)     #Testing the triggering from gcs
+
+    
+    # Adjust time ranges based on BST (add 1 hour during summer)
+    hour_offset = 1 if is_bst else 0
+    
+    # Base times (these are the winter times)
+    base_time_ranges = [
         (dt_time(23, 45), dt_time(0, 15), 1),       # Push New Cascade Id's back to Cascade (00:00)
         (dt_time(0, 16), dt_time(0, 45), 2),        # Delete removed Absences (00:30)
         (dt_time(0, 46), dt_time(1, 15), 3),        # Updates staff personal and adds new staff (01:00)
@@ -57,7 +71,15 @@ def find_run_type():
         (dt_time(3, 16), dt_time(3, 45), 4),        # Updates job details (03:30)
         (dt_time(3, 46), dt_time(4, 15), 5),        # Adds in new and changed Absences (04:00)
     ]
-
+    
+    # Adjust time ranges for BST
+    time_ranges = []
+    for start_time, end_time, run_type in base_time_ranges:
+        # Add hour offset for BST
+        new_start = dt_time((start_time.hour + hour_offset) % 24, start_time.minute)
+        new_end = dt_time((end_time.hour + hour_offset) % 24, end_time.minute)
+        time_ranges.append((new_start, new_end, run_type))
+        
     # Find matching time range
     for start_time, end_time, run_type in time_ranges:
         if start_time <= current_time < end_time:
@@ -510,27 +532,21 @@ def find_cascade_id_and_cont_service(ADP_identifier):
 
 def find_hierarchy_id(job_code,job_name,hierarchy_library,hierarchy_nodes): 
     hierarchy = None 
-    hierarchy_id = None
-    
+
     # First pass: try exact match (code + name) 
     for item in hierarchy_library: 
         if str(item["adp_code"]) == str(job_code) and str(item["adp_name"]) == str(job_name): 
-            hierarchy = str(item["cascade_code"])
+            hierarchy = str(item["hierarchy"])
             break 
         
         # Second pass: if no exact match, try fallback (code + name is None) 
         if hierarchy is None: 
             for item in hierarchy_library: 
                 if str(item["adp_code"]) == str(job_code) and item["adp_name"] is None: 
-                    hierarchy = str(item["cascade_code"])
+                    hierarchy = str(item["hierarchy"])
                     break 
-        
-        for node in hierarchy_nodes:
-            if node["SourceSystemId"] == str(hierarchy):
-                hierarchy_id = node["Id"]
-                break
-
-    return hierarchy_id
+           
+    return hierarchy
 
 def ID_generator(country,adp_responses):
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -558,7 +574,9 @@ def ID_generator(country,adp_responses):
         ADP_identifier = worker["workAssignments"][active_job_position]["positionID"]
         LM_kzo = worker['workAssignments'][active_job_position].get('reportsTo',[{}])[0].get("associateOID")
 
-        job_code = job_name = CascadeID = None
+        job_code = None
+        job_name = None
+        CascadeID = None
 
         if country == "usa":
             job_code = worker["workAssignments"][active_job_position]["homeOrganizationalUnits"][1]["nameCode"]["codeValue"]
@@ -1051,7 +1069,7 @@ def POST(new_records,adp_response,Cascade_full):
             trackingID = json_response.get("id")
             print (f'                   {trackingID}')
                     
-            if response.status_code == 201:
+            if response.status_code == 200:
                 json_response = response.json()
                 trackingID = json_response.get("id")
             elif response.status_code == 429:
@@ -1097,13 +1115,6 @@ def DELETE(delete_ids):
 #---------------------------------------- Top Level Function               
 def run_type_2():
     all_absences = []
-
-    '''if c == "usa":
-        absences = load_from_bucket("Absences")
-        cancellations = load_from_bucket("Cancellations")
-        ID_list = [record for record in ID_library if record["AOID"] in absences or record["AOID"] in cancellations]
-    
-    else:'''
     ID_list = ID_library
 
     ninety_days_ago = datetime.now() - timedelta(days=90)                                                   # ADP only returns last 90, this allows the same for cascade
@@ -1129,7 +1140,7 @@ def run_type_2():
                 new_records, Update_transformed, delete_ids, update_ids = combine_json_files_for_POST(current_absence_id_cascade,adp_current,cascade_current)  # Compares adp and cascade and removes any that are already in cascade
 
             DELETE(delete_ids)  # Deletes cancelled absences'''
-            if run_type_flag:
+            if run_type_flag is True:
                 POST(new_records,adp_response,Cascade_full)  # Creates new absences
 
         except json.JSONDecodeError as e:
@@ -1142,6 +1153,46 @@ def run_type_2():
             error_message = f"      Error processing CascadeId {CascadeId} on line {line_number}: {e}"
             print(error_message)
             continue
+
+def run_type_5():
+    all_absences = []
+    ID_list = ID_library
+
+    ninety_days_ago = datetime.now() - timedelta(days=90)                                                   # ADP only returns last 90, this allows the same for cascade
+    absences_from = ninety_days_ago.strftime('%Y-%m-%dT%H:%M:%S.000Z')
+
+    absence_reasons = create_absences_reasons()
+
+    for record in ID_list:
+        CascadeId = record["CascadeId"]
+        print(f"Updating absences for {CascadeId}")
+        Cascade_full, AOID = get_cascade_id(CascadeId,ID_library)            
+        
+        try:
+            adp_response = get_absences_adp(AOID)                               #Downloads the absences in the last 90 days for a given staff member
+
+            adp_current = convert_ADP_absences_to_cascade_format(adp_response,absence_reasons,Cascade_full,AOID,ninety_days_ago)              #Converts ADP absences into Cascade format
+
+            if len(adp_current) == 0:
+                print(f"        No booked absences for {CascadeId}")
+                continue  # If there are no absences, skip to the next record
+            else:
+                cascade_current, current_absence_id_cascade = cascade_absences(Cascade_full,absences_from)  # Pulls list of current absences
+                new_records, Update_transformed, delete_ids, update_ids = combine_json_files_for_POST(current_absence_id_cascade,adp_current,cascade_current)  # Compares adp and cascade and removes any that are already in cascade
+
+            POST(new_records,adp_response,Cascade_full)  # Creates new absences
+
+        except json.JSONDecodeError as e:
+            if str(e) == "Expecting value: line 1 column 1 (char 0)":
+                print("         No absences booked within the last 90 days")
+            else:
+                print(f"JSON decoding error: {e}")
+        except Exception as e:
+            line_number = sys.exc_info()[-1].tb_lineno
+            error_message = f"      Error processing CascadeId {CascadeId} on line {line_number}: {e}"
+            print(error_message)
+            continue
+
 
 #❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌   Update Personal Details (Run Type 3)
 
@@ -2156,9 +2207,9 @@ if __name__ == "__main__":
         allowed_run_types = {1,2,3,4,5}
 
         if run_type in allowed_run_types:
-            if run_type == 5:
-                run_type_flag = True
-                run_type = 2
+            print (f"Run-Type {run_type} for {c}")
+
+            print (run_type)
 
             # Construct function name dynamically
             func_name = f"run_type_{run_type}"
@@ -2166,11 +2217,12 @@ if __name__ == "__main__":
             # Get the function from globals
             func = globals().get(func_name)
             
+            print (func)
+
             if func:
                 func()
         else:
             print(f"Invalid run_type: {run_type}")
-            sys.exit()
 
         ID_library = []
 
@@ -2179,6 +2231,7 @@ if __name__ == "__main__":
 
     run_type = find_run_type()
     #run_type = 5                        #Comment this out in the production version
+ 
 
     for c in countries:
         country_choice (c,run_type)
