@@ -2197,21 +2197,17 @@ if __name__ == "__main__":
             hierarchy_nodes                            = GET_hierarchy_list(c)
             ID_library                                 = ID_generator(c,adp_responses)
 
-        allowed_run_types = {1,2,3,4,5}
+        run_type_functions = {
+            1: run_type_1,
+            2: run_type_2,
+            3: run_type_3,
+            4: run_type_4,
+            5: run_type_5
+        }
 
-        if run_type in allowed_run_types:
-            print (f"Run-Type {run_type} for {c}")
-
-            print (run_type)
-
-            # Construct function name dynamically
-            func_name = f"run_type_{run_type}"
-            
-            # Get the function from globals
-            func = globals().get(func_name)
-            
-            if func:
-                func()
+        if run_type in run_type_functions:
+            print(f"Run-Type {run_type} for {c}")
+            run_type_functions[run_type]()
         else:
             print(f"Invalid run_type: {run_type}")
 
@@ -2230,6 +2226,6 @@ if __name__ == "__main__":
     ct_fin = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ()
     print ("Finished - Putting up my feet (" + ct_fin + ")")
-    print ("---------------------------------------------------------------------------------------------------------------")
+    print ("----------------------------------------------------------------------------------------------------------------")
 
 
