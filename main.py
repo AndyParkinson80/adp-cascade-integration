@@ -30,7 +30,7 @@ from google.oauth2 import service_account
 from google.cloud import secretmanager
 from google.cloud import storage
 
-debug = False
+debug = True
 testing = False
 
 current_folder = Path(__file__).resolve().parent
@@ -305,7 +305,7 @@ def cascade_bearer (cascade_API_id):
     
     return cascade_token
 
-#❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌   API Calls
+# API Calls
 
 def api_count_adp(page_size,url,headers,type):
 
@@ -351,7 +351,7 @@ def api_call_cascade(cascade_token,api_url,api_params=None,api_data=None):
    
     return api_response
 
-#❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌   Global Data Calls
+# Global Data Calls
 
 def status_type(status):
     status_map = {
@@ -616,8 +616,7 @@ def ID_generator(country,adp_responses):
         export_data("002 - Security and Global","003 - ID_library.json", ID_library)
     return ID_library
     
-#❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌   Cascade to ADP (run-type-1)
-
+# Cascade to ADP (run-type-1)
 #---------------------------------------- Support Functions
 def create_cascadeID_update_list(ID_library, cascade, adp):
     cascade_exists_in_library = False
@@ -737,8 +736,7 @@ def run_type_1():
     CascadeId_to_upload             = whats_in_ADP(adp_responses, ID_library,c)
     upload_cascade_Ids_to_ADP(CascadeId_to_upload,c)
 
-#❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌   Delete/Update Absences (run-type-2/5)
-
+# Delete/Update Absences (run-type-2/5)
 #---------------------------------------- Support Functions
 def absence_days_from_adp(trackingID,adp_response,Cascade_full,section:int,record_no:int):
     data = adp_response
@@ -1193,9 +1191,7 @@ def run_type_5():
             print(error_message)
             continue
 
-
-#❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌   Update Personal Details (Run Type 3)
-
+# Update Personal Details (Run Type 3)
 #---------------------------------------Support Functions
 def make_api_request(DisplayId):
 
@@ -1632,8 +1628,7 @@ def run_type_3():
     PUT_cascade_workers_personal(unterminated_staff)
     POST_new_starters(new_starters)   
 
-#❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌   Update Job Details (Run Type 4)
-
+# Update Job Details (Run Type 4)
 #---------------------------------------Support Functions
 def create_params(page_size, skip_param):
     api_params = {
@@ -2159,8 +2154,6 @@ def run_type_4():
     PUT_update_job_change(PUT_jobs)
     POST_create_jobs(POST_jobs, new_start_jobs)
 
-#❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌             ❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌
-#❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌             ❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌
 
 if __name__ == "__main__":
 
@@ -2217,8 +2210,6 @@ if __name__ == "__main__":
             # Get the function from globals
             func = globals().get(func_name)
             
-            print (func)
-
             if func:
                 func()
         else:
@@ -2230,7 +2221,7 @@ if __name__ == "__main__":
     #countries = ["can"]           #Use to test Country independently)
 
     run_type = find_run_type()
-    #run_type = 5                        #Comment this out in the production version
+    run_type = 5                        #Comment this out in the production version
  
 
     for c in countries:
