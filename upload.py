@@ -29,9 +29,30 @@ with tempfile.NamedTemporaryFile(mode="w+", delete=False) as temp_file:
     temp_file.flush()
     SERVICE_ACCOUNT_PATH = temp_file.name
 
-# Step 2: Package source code
+# Step 2: Ensure all files are saved and synced before packaging
+def flush_all_files():
+    """Force the system to flush file buffers to disk before archiving."""
+    print("💾 Flushing all file buffers before archiving...")
+    try:
+        # Flush Python-level buffers
+        for obj in list(globals().values()):
+            if hasattr(obj, "flush") and callable(obj.flush):
+                try:
+                    obj.flush()
+                except Exception:
+                    pass
+
+        # Sync filesystem buffers
+        if hasattr(os, "sync"):
+            os.sync()
+        print("✅ All files flushed and synced.")
+    except Exception as e:
+        print(f"⚠️ Warning: could not flush all files — {e}")
+
+# Step 3: Package source code
 def create_tarball():
     print("📦 Creating tarball with Python tarfile module...")
+    flush_all_files()  # <-- always flush before archiving
     with tarfile.open(SOURCE_TAR, "w:gz") as tar:
         for root, dirs, files in os.walk("."):
             if "__pycache__" in root or ".git" in root:
@@ -44,7 +65,7 @@ def create_tarball():
                 tar.add(filepath, arcname=arcname)
     print(f"✅ Created {SOURCE_TAR}")
 
-# Step 3: Upload to GCS
+# Step 4: Upload to GCS
 def upload_source(credentials):
     print("📤 Uploading tarball to GCS...")
 
@@ -58,7 +79,7 @@ def upload_source(credentials):
     print("✅ Tarball uploaded to gcs bucket")
     return object_name
 
-# Step 4: Trigger Cloud Build
+# Step 5: Trigger Cloud Build
 def trigger_cloud_build(credentials, object_name):
     print("🔨 Triggering Cloud Build...")
     cloudbuild = build("cloudbuild", "v1", credentials=credentials)
@@ -86,7 +107,7 @@ def trigger_cloud_build(credentials, object_name):
     build_op = cloudbuild.projects().builds().create(projectId=PROJECT_ID, body=build_request).execute()
     print("✅ Cloud Build started. Build ID:", build_op["metadata"]["build"]["id"])
 
-# Step 5: Update Job (without running)
+# Step 6: Update Job (without running)
 def update_job_only(credentials):
     run_client = build("run", "v2", credentials=credentials)
     name = f"projects/{PROJECT_ID}/locations/{REGION}/jobs/{JOB_NAME}"
@@ -160,7 +181,7 @@ def update_job_only(credentials):
         print(f"❌ Error updating job: {e}")
         raise
 
-# Step 6: Update and Run Job
+# Step 7: Update and Run Job
 def update_and_run_job(credentials):
     run_client = build("run", "v2", credentials=credentials)
     name = f"projects/{PROJECT_ID}/locations/{REGION}/jobs/{JOB_NAME}"
@@ -251,10 +272,15 @@ if __name__ == "__main__":
     )
 
     try:
+
+        # 📦 Create the tarball
         create_tarball()
+
+        # ☁️ Upload and trigger build
         object_name = upload_source(credentials)
         trigger_cloud_build(credentials, object_name)
         
+        # 🚀 Deploy or update Cloud Run job
         if runGcloud:
             print("🚀 runGcloud is TRUE - Updating and running Cloud Run job...")
             update_and_run_job(credentials)
@@ -263,12 +289,11 @@ if __name__ == "__main__":
             update_job_only(credentials)
             
     finally:
-        # Clean up: Delete the tarball
+        # 🧹 Clean up artifacts
         if os.path.exists(SOURCE_TAR):
             os.remove(SOURCE_TAR)
             print(f"🗑️  Cleaned up: Deleted {SOURCE_TAR}")
         
-        # Clean up: Delete the temporary service account file
         if os.path.exists(SERVICE_ACCOUNT_PATH):
             os.remove(SERVICE_ACCOUNT_PATH)
             print(f"🗑️  Cleaned up: Deleted temporary service account file")

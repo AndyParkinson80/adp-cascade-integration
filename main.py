@@ -30,7 +30,7 @@ from google.oauth2 import service_account
 from google.cloud import secretmanager
 from google.cloud import storage
 
-debug = True
+debug = False
 testing = False
 
 current_folder = Path(__file__).resolve().parent
@@ -43,7 +43,7 @@ cascade_absences_url = 'https://api.iris.co.uk/hr/v2/attendance/absences'
 cascade_absencedays = 'https://api.iris.co.uk/hr/v2/attendance/absencedays'
 
 
-#❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌    Set up
+# Set up
 
 def find_run_type():
     
@@ -329,9 +329,9 @@ def api_call(page_size,skip_param,api_url,api_headers,type):
     "$skip": skip_param
     }
 
-    api_response = requests.get(api_url, headers = api_headers, params = api_params)
+    api_response = requests.get(api_url,cert=(certfile, keyfile), headers = api_headers, params = api_params)
     time.sleep(0.6)   
-   
+
     return api_response    
 
 def api_count_cascade(api_response,page_size):
@@ -381,8 +381,7 @@ def GET_workers_adp():
             }
         
         api_calls = api_count_adp(page_size,adp_workers,api_headers,type)
-
-        for i in range(api_calls):      
+        for i in range(api_calls):
             skip_param = i * page_size
 
             api_response = api_call(page_size,skip_param,adp_workers,api_headers,type)
@@ -395,8 +394,10 @@ def GET_workers_adp():
                     worker for worker in json_data 
                     if worker.get('workerID', {}).get('idValue') not in strings_to_exclude
                 ]
-                
+                    
                 globals()[f"adp_{status}"].extend(filtered_data)
+            else:
+                continue
 
         if Data_export:
             export_data("002 - Security and Global", f"001 - ADP (Data Out - {status}).json", globals()[f"adp_{status}"])    
@@ -530,7 +531,7 @@ def find_cascade_id_and_cont_service(ADP_identifier):
             break  # Exit loop once a match is found
     return CascadeID,Cascade_full,contServiceCascade
 
-def find_hierarchy_id(job_code,job_name,hierarchy_library,hierarchy_nodes): 
+def find_hierarchy_id(job_code,job_name,hierarchy_library): 
     hierarchy = None 
 
     # First pass: try exact match (code + name) 
@@ -549,6 +550,7 @@ def find_hierarchy_id(job_code,job_name,hierarchy_library,hierarchy_nodes):
     return hierarchy
 
 def ID_generator(country,adp_responses):
+
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("    Creating an ID library (" + time_now + ")")
 
@@ -587,7 +589,7 @@ def ID_generator(country,adp_responses):
 
         CascadeID, Cascade_full, contServiceCascade = find_cascade_id_and_cont_service(ADP_identifier)
 
-        hierarchy_id = find_hierarchy_id(job_code, job_name, hierarchy_library,hierarchy_nodes)
+        hierarchy_id = find_hierarchy_id(job_code, job_name, hierarchy_library)
 
         if CascadeID is None:
             date = formatted_date
@@ -1111,16 +1113,14 @@ def DELETE(delete_ids):
     
         time.sleep(0.6)  
 #---------------------------------------- Top Level Function               
-def run_type_2():
-    all_absences = []
-    ID_list = ID_library
+def run_type_2(ID_library):
 
     ninety_days_ago = datetime.now() - timedelta(days=90)                                                   # ADP only returns last 90, this allows the same for cascade
     absences_from = ninety_days_ago.strftime('%Y-%m-%dT%H:%M:%S.000Z')
 
     absence_reasons = create_absences_reasons()
 
-    for record in ID_list:
+    for record in ID_library:
         CascadeId = record["CascadeId"]
         print(f"Updating absences for {CascadeId}")
         Cascade_full, AOID = get_cascade_id(CascadeId,ID_library)            
@@ -1137,9 +1137,8 @@ def run_type_2():
                 cascade_current, current_absence_id_cascade = cascade_absences(Cascade_full,absences_from)  # Pulls list of current absences
                 new_records, Update_transformed, delete_ids, update_ids = combine_json_files_for_POST(current_absence_id_cascade,adp_current,cascade_current)  # Compares adp and cascade and removes any that are already in cascade
 
-            DELETE(delete_ids)  # Deletes cancelled absences'''
-            if run_type_flag is True:
-                POST(new_records,adp_response,Cascade_full)  # Creates new absences
+            DELETE(delete_ids)  # Deletes cancelled absences
+            POST(new_records,adp_response,Cascade_full)  # Creates new absences
 
         except json.JSONDecodeError as e:
             if str(e) == "Expecting value: line 1 column 1 (char 0)":
@@ -1152,16 +1151,13 @@ def run_type_2():
             print(error_message)
             continue
 
-def run_type_5():
-    all_absences = []
-    ID_list = ID_library
-
+def run_type_5(ID_library):
     ninety_days_ago = datetime.now() - timedelta(days=90)                                                   # ADP only returns last 90, this allows the same for cascade
     absences_from = ninety_days_ago.strftime('%Y-%m-%dT%H:%M:%S.000Z')
 
     absence_reasons = create_absences_reasons()
 
-    for record in ID_list:
+    for record in ID_library:
         CascadeId = record["CascadeId"]
         print(f"Updating absences for {CascadeId}")
         Cascade_full, AOID = get_cascade_id(CascadeId,ID_library)            
@@ -2182,42 +2178,43 @@ if __name__ == "__main__":
         #----------     Global Data Calls     ----------#
         time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print ("    Making global calls (" + time_now + ")")
-        
+
+        global adp_responses,adp_terminated,cascade_responses,hierarchy_nodes,ID_library                              
+
         if testing:
-            global adp_responses,adp_terminated,cascade_responses,hierarchy_nodes,ID_library                              
             load("002 - Security and Global","001 - ADP (Data Out - active).json","adp_responses")
             load("002 - Security and Global","001 - ADP (Data Out - terminated).json","adp_terminated")
             load("002 - Security and Global","001 - Cascade Raw Out.json","cascade_responses")
             load("002 - Security and Global","002 - Hierarchy Nodes.json","hierarchy_nodes")
-            load("002 - Security and Global","003 - ID_library.json","ID_library")
 
         else:
             adp_responses, adp_leave, adp_terminated   = GET_workers_adp()
             cascade_responses                          = GET_workers_cascade()
             hierarchy_nodes                            = GET_hierarchy_list(c)
-            ID_library                                 = ID_generator(c,adp_responses)
 
-        run_type_functions = {
-            1: run_type_1,
-            2: run_type_2,
-            3: run_type_3,
-            4: run_type_4,
-            5: run_type_5
-        }
+        ID_library                                     = ID_generator(c,adp_responses)
 
-        if run_type in run_type_functions:
-            print(f"Run-Type {run_type} for {c}")
-            run_type_functions[run_type]()
+        if run_type == 1:
+            run_type_1()
+        elif run_type == 2:
+            run_type_2(ID_library)
+        elif run_type == 3:
+            run_type_3()
+        elif run_type == 4:
+            run_type_4()
+        elif run_type == 5:
+            run_type_5(ID_library)
         else:
-            print(f"Invalid run_type: {run_type}")
+            print ("Run-type not defined, defaulting to type 1")
+            run_type_1()
+        
 
-        ID_library = []
 
     countries = ["usa","can"]
     #countries = ["can"]           #Use to test Country independently)
 
     run_type = find_run_type()
-    run_type = 5                        #Comment this out in the production version
+    #run_type = 5                        #Comment this out in the production version
  
 
     for c in countries:
