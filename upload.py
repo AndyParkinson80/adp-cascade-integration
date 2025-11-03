@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import tempfile
 from google.oauth2 import service_account
@@ -10,6 +11,7 @@ import tarfile
 # Control flag
 runGcloud = True
 
+
 # Configuration
 PROJECT_ID = os.environ.get("PROJECT_ID")
 REGION = "europe-west2"
@@ -20,14 +22,36 @@ JOB_NAME = "adp-integrations"
 BUCKET_NAME = f"gcf-artifacts-{PROJECT_ID}"  # Must exist
 SOURCE_TAR = "source.tar.gz"
 
-# Step 1: Get secret
-GOOGLE_CLOUD_SECRET = os.environ.get("GOOGLE_CLOUD_SECRET")
-assert GOOGLE_CLOUD_SECRET, "GOOGLE_CLOUD_SECRET is not set"
+# Step 1: Set up credentials
+SERVICE_ACCOUNT_PATH = None  # Initialize for cleanup
 
-with tempfile.NamedTemporaryFile(mode="w+", delete=False) as temp_file:
-    temp_file.write(GOOGLE_CLOUD_SECRET)
-    temp_file.flush()
-    SERVICE_ACCOUNT_PATH = temp_file.name
+if os.getenv('GCP'):
+    # Running locally - use GCP environment variable (as file path)
+    print("🔑 Using local GCP credentials from file")
+    gcp_file_path = os.getenv('GCP')
+    
+    with open(gcp_file_path, 'r') as f:
+        service_account_info = json.load(f)
+    
+    credentials = service_account.Credentials.from_service_account_info(
+        service_account_info,
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )
+else:
+    # Running in Codespaces - use GOOGLE_CLOUD_SECRET
+    print("🔑 Using Codespaces credentials from GOOGLE_CLOUD_SECRET")
+    GOOGLE_CLOUD_SECRET = os.environ.get("GOOGLE_CLOUD_SECRET")
+    assert GOOGLE_CLOUD_SECRET, "GOOGLE_CLOUD_SECRET is not set"
+    
+    with tempfile.NamedTemporaryFile(mode="w+", delete=False) as temp_file:
+        temp_file.write(GOOGLE_CLOUD_SECRET)
+        temp_file.flush()
+        SERVICE_ACCOUNT_PATH = temp_file.name
+    
+    credentials = service_account.Credentials.from_service_account_file(
+        SERVICE_ACCOUNT_PATH,
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )
 
 # Step 2: Ensure all files are saved and synced before packaging
 def flush_all_files():
@@ -266,13 +290,7 @@ def update_and_run_job(credentials):
 
 
 if __name__ == "__main__":
-    credentials = service_account.Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_PATH,
-        scopes=["https://www.googleapis.com/auth/cloud-platform"]
-    )
-
     try:
-
         # 📦 Create the tarball
         create_tarball()
 
@@ -294,6 +312,7 @@ if __name__ == "__main__":
             os.remove(SOURCE_TAR)
             print(f"🗑️  Cleaned up: Deleted {SOURCE_TAR}")
         
-        if os.path.exists(SERVICE_ACCOUNT_PATH):
+        # Only clean up temp file if it was created (Codespaces mode)
+        if SERVICE_ACCOUNT_PATH and os.path.exists(SERVICE_ACCOUNT_PATH):
             os.remove(SERVICE_ACCOUNT_PATH)
             print(f"🗑️  Cleaned up: Deleted temporary service account file")

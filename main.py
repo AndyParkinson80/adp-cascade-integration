@@ -30,7 +30,7 @@ from google.oauth2 import service_account
 from google.cloud import secretmanager
 from google.cloud import storage
 
-debug = False
+debug = True
 testing = False
 
 current_folder = Path(__file__).resolve().parent
@@ -175,7 +175,7 @@ def google_auth():
             return credentials, project_id
 
         # 3. Local dev (service account file path)
-        file_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        file_path = os.getenv("GCP")
         if file_path and os.path.exists(file_path):
             credentials = service_account.Credentials.from_service_account_file(file_path)
             with open(file_path) as f:
@@ -1901,7 +1901,7 @@ def adp_rejig(cascade_current,adp_responses,ID_library):
 
     if Data_export:
         export_data("004 - Jobs to Cascade","003a - ADP_reordered (Staff with roles).json", transformed_records)    
-        export_data("004 - Jobs to Cascade","003b - ADP_reordered (Staff with roles - Id).json", records_to_add)    
+        export_data("004 - Jobs to Cascade","003b - ADP_reordered (Staff with roles - Id).json", records_to_add)   #This gives the IDs for above 
         export_data("004 - Jobs to Cascade","003c - ADP_reordered (New Starters).json",new_start_jobs)
                 
     return transformed_records,new_start_jobs   
@@ -1915,14 +1915,11 @@ def adp_rejig_new_starters(new_starters,adp_responses,ID_library):
     new_starter_values = [entry["AOID"] for entry in new_starters]
 
     for response in adp_responses:
-        workers = response.get("workers", [])
-        filtered_workers = [
-            worker for worker in workers if worker.get("associateOID") in new_starter_values
-        ]
-
-        if filtered_workers:
-            response["workers"] = filtered_workers
+        if response["associateOID"] in new_starter_values:
             new_start.append(response)
+
+    export_data("004 - Jobs to Cascade","004d - New Starter Jobs (ADP data).json", new_start)    
+
 
     for worker in new_start:
         active_job_position = find_active_job_position(worker)
@@ -1936,7 +1933,7 @@ def adp_rejig_new_starters(new_starters,adp_responses,ID_library):
         ADP_id = worker["workAssignments"][active_job_position]["positionID"]
         LM_AOID = worker['workAssignments'][active_job_position].get('reportsTo',[{}])[0].get("associateOID",None)
 
-        contract                    = (c,worker,active_job_position)
+        contract                    = find_contract(c,worker,active_job_position)
         employee_id,hierarchy_id    = search_ID_lib(ID_library,ADP_id)
         line_manager                = find_line_manager(ID_library,LM_AOID,employee_id)
         paybasis                    = choose_paybasis(paybasis_hourly)
@@ -2150,7 +2147,6 @@ def run_type_4():
     PUT_update_job_change(PUT_jobs)
     POST_create_jobs(POST_jobs, new_start_jobs)
 
-
 if __name__ == "__main__":
 
     if testing is False:
@@ -2167,7 +2163,7 @@ if __name__ == "__main__":
         print (f"Synchronizing country: {c}")                                           #c represents country. Either USA or CAN
 
         global access_token, cascade_token, certfile, keyfile, strings_to_exclude, extended_update
-        global Data_export, data_store,country_hierarchy_USA, country_hierarchy_CAN,run_type_flag
+        global Data_export, data_store,country_hierarchy_USA, country_hierarchy_CAN
         
         data_store = data_store_location(c)
         client_id, client_secret, strings_to_exclude, country_hierarchy_USA, country_hierarchy_CAN, cascade_API_id, keyfile, certfile = load_keys(c)
@@ -2214,7 +2210,7 @@ if __name__ == "__main__":
     #countries = ["can"]           #Use to test Country independently)
 
     run_type = find_run_type()
-    #run_type = 5                        #Comment this out in the production version
+    run_type = 4                        #Comment this out in the production version
  
 
     for c in countries:
