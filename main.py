@@ -30,7 +30,7 @@ from google.oauth2 import service_account
 from google.cloud import secretmanager
 from google.cloud import storage
 
-debug = True
+debug = False
 testing = False
 
 current_folder = Path(__file__).resolve().parent
@@ -1527,7 +1527,7 @@ def combine_json_files(adp_to_cascade_terminated,adp_to_cascade,cascade_reordere
             
             processed_unterminated_records.append(updated_record)
             
-            print(f"Updated record for DisplayId {display_id}: Cascade Full Id = {new_id}")
+            print(f"Leaver set - DisplayId {display_id}")
         else:
             print(f"Warning: No DisplayId found in record")
             processed_unterminated_records.append(record)
@@ -2210,7 +2210,7 @@ if __name__ == "__main__":
     #countries = ["can"]           #Use to test Country independently)
 
     run_type = find_run_type()
-    run_type = 4                        #Comment this out in the production version
+    run_type = 5                        #Comment this out in the production version
  
 
     for c in countries:
