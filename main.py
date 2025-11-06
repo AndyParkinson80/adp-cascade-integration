@@ -56,7 +56,7 @@ def find_run_type():
     
     # Get the current UK time (not system time)
     current_time = now_uk.time()
-    #current_time = dt_time(5,0,5)     #Testing the triggering from gcs
+    #current_time = dt_time(4,0,0)     #Testing the triggering from gcs
 
     
     # Adjust time ranges based on BST (add 1 hour during summer)
@@ -64,8 +64,8 @@ def find_run_type():
     
     # Base times (these are the winter times)
     base_time_ranges = [
-        (dt_time(23, 45), dt_time(0, 15), 1),       # Push New Cascade Id's back to Cascade (00:00)
-        (dt_time(0, 16), dt_time(0, 45), 2),        # Delete removed Absences (00:30)
+        (dt_time(22, 46), dt_time(23, 15), 1),       # Push New Cascade Id's back to Cascade (23:00)
+        (dt_time(0, 1), dt_time(0, 30), 2),        # Delete removed Absences (00:00)
         (dt_time(0, 46), dt_time(1, 15), 3),        # Updates staff personal and adds new staff (01:00)
         (dt_time(2, 45), dt_time(3, 15), 1),        # Push New Cascade Id's back to Cascade (Pushes ID for new Staff) (03:00)
         (dt_time(3, 16), dt_time(3, 45), 4),        # Updates job details (03:30)
@@ -2200,18 +2200,14 @@ if __name__ == "__main__":
             run_type_4()
         elif run_type == 5:
             run_type_5(ID_library)
-        else:
-            print ("Run-type not defined, defaulting to type 1")
-            run_type_1()
-        
+
 
 
     countries = ["usa","can"]
     #countries = ["can"]           #Use to test Country independently)
 
     run_type = find_run_type()
-    run_type = 4                        #Comment this out in the production version
- 
+    print (f"Run type {run_type}")
 
     for c in countries:
         country_choice (c,run_type)
