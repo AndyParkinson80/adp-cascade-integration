@@ -5,25 +5,18 @@ import tempfile
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+from google.auth import default
+from google.auth.exceptions import DefaultCredentialsError
 import datetime
 import tarfile
 
 # Control flag
 runGcloud = True
 
-
-# Configuration
-PROJECT_ID = os.environ.get("PROJECT_ID")
-REGION = "europe-west2"
-REPO = "integration"
-IMAGE_NAME = "integration"
-TAG = f"{REGION}-docker.pkg.dev/{PROJECT_ID}/{REPO}/{IMAGE_NAME}:latest"
-JOB_NAME = "adp-integrations"
-BUCKET_NAME = f"gcf-artifacts-{PROJECT_ID}"  # Must exist
-SOURCE_TAR = "source.tar.gz"
-
 # Step 1: Set up credentials
 SERVICE_ACCOUNT_PATH = None  # Initialize for cleanup
+service_account_info = None  # Will hold the parsed JSON
+PROJECT_ID = None  # Will be extracted from credentials
 
 if os.getenv('GCP'):
     # Running locally - use GCP environment variable (as file path)
@@ -37,11 +30,21 @@ if os.getenv('GCP'):
         service_account_info,
         scopes=["https://www.googleapis.com/auth/cloud-platform"]
     )
-else:
+    
+    # Extract PROJECT_ID from service account JSON
+    PROJECT_ID = service_account_info.get("project_id")
+    
+elif os.environ.get("GOOGLE_CLOUD_SECRET"):
     # Running in Codespaces - use GOOGLE_CLOUD_SECRET
     print("🔑 Using Codespaces credentials from GOOGLE_CLOUD_SECRET")
     GOOGLE_CLOUD_SECRET = os.environ.get("GOOGLE_CLOUD_SECRET")
-    assert GOOGLE_CLOUD_SECRET, "GOOGLE_CLOUD_SECRET is not set"
+    
+    # Parse the JSON to extract service account info
+    try:
+        service_account_info = json.loads(GOOGLE_CLOUD_SECRET)
+    except json.JSONDecodeError as e:
+        print(f"❌ Failed to parse GOOGLE_CLOUD_SECRET as JSON")
+        raise
     
     with tempfile.NamedTemporaryFile(mode="w+", delete=False) as temp_file:
         temp_file.write(GOOGLE_CLOUD_SECRET)
@@ -52,6 +55,41 @@ else:
         SERVICE_ACCOUNT_PATH,
         scopes=["https://www.googleapis.com/auth/cloud-platform"]
     )
+    
+    # Extract PROJECT_ID from service account JSON
+    PROJECT_ID = service_account_info.get("project_id")
+    
+else:
+    # Try Application Default Credentials (gcloud auth application-default login)
+    print("🔑 Attempting to use Application Default Credentials")
+    try:
+        credentials, PROJECT_ID = default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        print(f"✅ Using ADC with project: {PROJECT_ID}")
+            
+    except DefaultCredentialsError as e:
+        print(f"❌ No credentials found. Please either:")
+        print(f"   1. Set GCP environment variable: export GCP='/path/to/service-account.json'")
+        print(f"   2. Set GOOGLE_CLOUD_SECRET for Codespaces")
+        print(f"   3. Run: gcloud auth application-default login")
+        raise
+
+# Validate PROJECT_ID was extracted
+if not PROJECT_ID:
+    raise ValueError(
+        "PROJECT_ID could not be extracted from credentials. "
+        "Ensure your service account JSON contains 'project_id' field."
+    )
+
+print(f"✅ Using PROJECT_ID: {PROJECT_ID}")
+
+# Configuration
+REGION = "europe-west2"
+REPO = "integration"
+IMAGE_NAME = "integration"
+TAG = f"{REGION}-docker.pkg.dev/{PROJECT_ID}/{REPO}/{IMAGE_NAME}:latest"
+JOB_NAME = "adp-integrations"
+BUCKET_NAME = f"gcf-artifacts-{PROJECT_ID}"  # Must exist
+SOURCE_TAR = "source.tar.gz"
 
 # Step 2: Ensure all files are saved and synced before packaging
 def flush_all_files():
