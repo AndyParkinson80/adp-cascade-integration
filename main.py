@@ -56,7 +56,7 @@ def find_run_type():
     
     # Get the current UK time (not system time)
     current_time = now_uk.time()
-    #current_time = dt_time(4,0,0)     #Testing the triggering from gcs
+    #current_time = dt_time(3,30,0)     #Testing the triggering from gcs
 
     
     # Adjust time ranges based on BST (add 1 hour during summer)
@@ -65,7 +65,7 @@ def find_run_type():
     # Base times (these are the winter times)
     base_time_ranges = [
         (dt_time(22, 46), dt_time(23, 15), 1),       # Push New Cascade Id's back to Cascade (23:00)
-        (dt_time(0, 1), dt_time(0, 30), 2),        # Delete removed Absences (00:00)
+        (dt_time(23, 15), dt_time(23, 45), 2),        # Delete removed Absences (00:00)
         (dt_time(0, 46), dt_time(1, 15), 3),        # Updates staff personal and adds new staff (01:00)
         (dt_time(2, 45), dt_time(3, 15), 1),        # Push New Cascade Id's back to Cascade (Pushes ID for new Staff) (03:00)
         (dt_time(3, 16), dt_time(3, 45), 4),        # Updates job details (03:30)
@@ -1917,8 +1917,8 @@ def adp_rejig_new_starters(new_starters,adp_responses,ID_library):
     for response in adp_responses:
         if response["associateOID"] in new_starter_values:
             new_start.append(response)
-
-    export_data("004 - Jobs to Cascade","004d - New Starter Jobs (ADP data).json", new_start)    
+    if Data_export:
+        export_data("004 - Jobs to Cascade","004d - New Starter Jobs (ADP data).json", new_start)    
 
 
     for worker in new_start:
