@@ -1,9 +1,0 @@
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-## Needed to run the scripts on Windows ##
-
-
-gcloud builds submit --tag europe-west2-docker.pkg.dev/api-integrations-412107/integration/integration:latest
-
-gcloud run jobs update adp-integrations --image europe-west2-docker.pkg.dev/api-integrations-412107/integration/integration:latest --region europe-west2
-
-gcloud run jobs execute adp-integrations --region europe-west2
