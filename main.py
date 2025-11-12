@@ -31,6 +31,8 @@ from google.cloud import secretmanager
 from google.cloud import storage
 
 debug = False
+test_time = dt_time(1,0,0)     #Testing the triggering from gcs
+
 testing = False
 
 current_folder = Path(__file__).resolve().parent
@@ -49,15 +51,15 @@ def find_run_type():
     
     now_uk = datetime.now(ZoneInfo("Europe/London"))
     is_bst = bool(now_uk.dst())
-    #is_bst = False
 
     print("Current UK time:", now_uk)
     print("BST active?", is_bst)
     
     # Get the current UK time (not system time)
-    current_time = now_uk.time()
-    #current_time = dt_time(3,30,0)     #Testing the triggering from gcs
-
+    if debug is True:
+        current_time = test_time
+    if debug is False:
+        current_time = now_uk.time()
     
     # Adjust time ranges based on BST (add 1 hour during summer)
     hour_offset = 1 if is_bst else 0
