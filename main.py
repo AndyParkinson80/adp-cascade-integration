@@ -30,8 +30,8 @@ from google.oauth2 import service_account
 from google.cloud import secretmanager
 from google.cloud import storage
 
-debug = False
-test_time = dt_time(1,0,0)     #Testing the triggering from gcs
+debug = True
+test_time = dt_time(23,30,0)     #Testing the triggering from gcs
 
 testing = False
 
@@ -43,7 +43,6 @@ cascade_workers_base = 'https://api.iris.co.uk/hr/v2/employees'
 cascade_jobs_url = 'https://api.iris.co.uk/hr/v2/jobs?%24count=true'
 cascade_absences_url = 'https://api.iris.co.uk/hr/v2/attendance/absences'        
 cascade_absencedays = 'https://api.iris.co.uk/hr/v2/attendance/absencedays'
-
 
 # Set up
 
@@ -846,15 +845,23 @@ def get_cascade_id(CascadeId,ID_library):
     
     return Cascade_full,AOID
 
+import time
+
 def get_absences_adp(AOID):
-
     api_url = "https://api.adp.com/time/v2/workers/" + AOID + "/time-off-details/time-off-requests"
-
     api_headers = {
         'Authorization': f'Bearer {access_token}',
     }
 
-    api_response = requests.get(api_url, cert=(certfile, keyfile), verify=True, headers=api_headers)
+    while True:
+        api_response = requests.get(api_url, cert=(certfile, keyfile), verify=True, headers=api_headers)
+        
+        if api_response.status_code == 429:
+            time.sleep(1)
+            continue
+        
+        break
+    
     adp_response = api_response.json()
 
     if Data_export:
@@ -1130,12 +1137,11 @@ def run_type_2(ID_library):
         try:
             adp_response = get_absences_adp(AOID)                               #Downloads the absences in the last 90 days for a given staff member
 
-            adp_current = convert_ADP_absences_to_cascade_format(adp_response,absence_reasons,Cascade_full,AOID,ninety_days_ago)              #Converts ADP absences into Cascade format
-
-            if len(adp_current) == 0:
+            if len(adp_response) == 0:
                 print(f"        No booked absences for {CascadeId}")
-                continue  # If there are no absences, skip to the next record
+                continue  # If there are no absences, skip to the next record                
             else:
+                adp_current = convert_ADP_absences_to_cascade_format(adp_response,absence_reasons,Cascade_full,AOID,ninety_days_ago)              #Converts ADP absences into Cascade format
                 cascade_current, current_absence_id_cascade = cascade_absences(Cascade_full,absences_from)  # Pulls list of current absences
                 new_records, Update_transformed, delete_ids, update_ids = combine_json_files_for_POST(current_absence_id_cascade,adp_current,cascade_current)  # Compares adp and cascade and removes any that are already in cascade
 
