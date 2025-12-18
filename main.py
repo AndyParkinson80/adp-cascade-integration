@@ -32,7 +32,7 @@ from google.cloud import secretmanager
 from google.cloud import storage
 
 debug = False
-test_time = dt_time(4,0,0)     #Testing the triggering from gcs
+test_time = dt_time(3,30,0)     #Testing the triggering from gcs
 
 testing = False
 
@@ -1573,6 +1573,8 @@ def find_line_manager(ID_library,LM_AOID,employee_id):
 
     if employee_id in reports_to_JJ:
         line_manager = "b3775d20-8d33-4ca9-aaad-5e2346bb17e9"
+    if LM_AOID == "G3BFJBFXG2J1KB05":
+        line_manager = "6f3f3e39-f6cb-4dfe-94d8-688a17ac092c"
     else:
         for record in ID_library:
             if record["AOID"]==LM_AOID:
@@ -1754,7 +1756,12 @@ def adp_rejig(cascade_current,adp_responses,ID_library):
 
         contract                    = find_contract(c,worker,active_job_position)
         employee_id,hierarchy_id    = search_ID_lib(ID_library,ADP_id)
-        line_manager                = find_line_manager(ID_library,LM_AOID,employee_id)
+        try:
+            line_manager                = find_line_manager(ID_library,LM_AOID,employee_id)
+        except Exception:
+            print (ADP_id)
+            print (LM_AOID)
+            input ("...")
         paybasis                    = choose_paybasis(paybasis_hourly)
         salary,salary_rounded       = round_salary(pay_hourly,pay_annual)     
         contract                    = change_contract_language(contract)
@@ -2113,10 +2120,6 @@ if __name__ == "__main__":
             run_type_3()
         elif run_type == 4:
             run_type_4()
-        elif run_type == 5:
-            run_type_5(ID_library)
-
-
 
     countries = ["usa","can"]
     #countries = ["can"]           #Use to test Country independently)
