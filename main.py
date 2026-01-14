@@ -7,6 +7,7 @@ import math
 import tempfile
 from pathlib import Path
 import pprint
+import stat
 
 # Standard Library - Time/Date
 import time
@@ -32,7 +33,7 @@ from google.cloud import secretmanager
 from google.cloud import storage
 
 debug = False
-test_time = dt_time(4,0,0)     #Testing the triggering from gcs
+test_time = dt_time(1,0,0)     #Testing the triggering from gcs
 
 testing = False
 
@@ -131,6 +132,22 @@ def create_folders(current_folder, structure=None, created_paths=None):
     return created_paths
 
 def delete_folders():
+    def handle_remove_readonly(func, path, exc_info):
+        """
+        Error handler for readonly files and folders.
+        Changes file permissions and retries deletion.
+        """
+        if isinstance(exc_info[1], PermissionError):
+            # Remove readonly attribute and try again
+            os.chmod(path, stat.S_IWRITE)
+            time.sleep(0.1)  # Brief pause for OneDrive
+            try:
+                func(path)
+            except PermissionError:
+                print(f"Warning: Could not delete {path} - file may be locked by OneDrive")
+        else:
+            raise
+    
     base_path_delete = current_folder / "Data Store"
     folders_to_delete = ["Data - CAN", "Data - USA"]
 
@@ -140,7 +157,22 @@ def delete_folders():
         
         # Delete the folder and its contents recursively if it exists
         if os.path.exists(folder_path):
-            shutil.rmtree(folder_path)
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    shutil.rmtree(folder_path, onexc=handle_remove_readonly)
+                    print(f"Successfully deleted: {folder_path}")
+                    break
+                except PermissionError as e:
+                    if attempt < max_retries - 1:
+                        print(f"Retry {attempt + 1}/{max_retries} for {folder_path}")
+                        time.sleep(1)
+                    else:
+                        print(f"Failed to delete {folder_path} after {max_retries} attempts: {e}")
+                        print("Continuing with script execution...")
+                except Exception as e:
+                    print(f"Unexpected error deleting {folder_path}: {e}")
+                    break
     
     time.sleep(1)
 
@@ -433,6 +465,8 @@ def GET_workers_cascade():
                 json_data = api_response.json()
                 json_data = json_data['value']
                 cascade_responses.extend(json_data)    
+
+    cascade_responses = [record for record in cascade_responses if record.get('DisplayId') is not None]
 
     if Data_export:
         export_data("002 - Security and Global", "001 - Cascade Raw Out.json", cascade_responses)    
@@ -1571,8 +1605,10 @@ def find_line_manager(ID_library,LM_AOID,employee_id):
     df = pd.read_excel(xlsx_in_memory, sheet_name='JJ')
     reports_to_JJ = df['ID'].tolist()
 
-    if employee_id in reports_to_JJ:
+    if employee_id in reports_to_JJ:                            #JJ
         line_manager = "b3775d20-8d33-4ca9-aaad-5e2346bb17e9"
+    elif LM_AOID == "G3BFJBFXG2J1KB05":                         #AL
+        line_manager = "6f3f3e39-f6cb-4dfe-94d8-688a17ac092c"
     else:
         for record in ID_library:
             if record["AOID"]==LM_AOID:
@@ -1741,7 +1777,7 @@ def adp_rejig(cascade_current,adp_responses,ID_library):
 
     for worker in adp_responses:
         active_job_position = find_active_job_position(worker)
-       
+    
         jobTitle = worker["workAssignments"][active_job_position].get("jobTitle")
         paybasis_hourly = worker.get("workAssignments", [{}])[active_job_position].get("baseRemuneration", {}).get("hourlyRateAmount", {}).get("nameCode", {}).get("shortName", None)
         pay_hourly = worker.get("workAssignments", [{}])[active_job_position].get("baseRemuneration", {}).get("hourlyRateAmount", {}).get("amountValue", None)
@@ -1809,7 +1845,7 @@ def adp_rejig(cascade_current,adp_responses,ID_library):
 
                 transformed_records.append(transformed_record)
                 records_to_add.append(record_to_add)
-                
+
     new_start_jobs = find_new_starters(records_to_add,ID_library)
 
     if Data_export:
