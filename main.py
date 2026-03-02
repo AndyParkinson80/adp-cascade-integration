@@ -32,7 +32,7 @@ from google.oauth2 import service_account
 from google.cloud import secretmanager
 from google.cloud import storage
 
-debug = False
+debug = True
 test_time = dt_time(3,30,0)     #Testing the triggering from gcs
 
 testing = False
@@ -46,11 +46,9 @@ cascade_jobs_url = 'https://api.iris.co.uk/hr/v2/jobs?%24count=true'
 cascade_absences_url = 'https://api.iris.co.uk/hr/v2/attendance/absences'        
 cascade_absencedays = 'https://api.iris.co.uk/hr/v2/attendance/absencedays'
 
-pp = pprint.PrettyPrinter(indent=4, width=80, sort_dicts=False)
-
 # Set up
 
-def find_run_type():
+def findRunType():
     
     now_uk = datetime.now(ZoneInfo("Europe/London"))
     is_bst = bool(now_uk.dst())
@@ -69,10 +67,9 @@ def find_run_type():
     
     # Base times (these are the winter times)
     base_time_ranges = [
-        (dt_time(22, 46), dt_time(23, 15), 1),       # Push New Cascade Id's back to Cascade (23:00)
-        #(dt_time(23, 15), dt_time(23, 45), 2),        # Delete removed Absences (00:00)
+        (dt_time(22, 46), dt_time(23, 15), 1),       # Push New Cascade Id's back to ADP (23:00)
         (dt_time(0, 46), dt_time(1, 15), 3),        # Updates staff personal and adds new staff (01:00)
-        (dt_time(2, 45), dt_time(3, 15), 1),        # Push New Cascade Id's back to Cascade (Pushes ID for new Staff) (03:00)
+        (dt_time(2, 45), dt_time(3, 15), 1),        # Push New Cascade Id's back to ADP (Pushes ID for new Staff) (03:00)
         (dt_time(3, 16), dt_time(3, 45), 4),        # Updates job details (03:30)
         (dt_time(3, 46), dt_time(4, 15), 2),        # Removes deleted and Adds in new and changed Absences (04:00)
     ]
@@ -93,7 +90,7 @@ def find_run_type():
     # Default run type if no time range matches
     return 1
 
-def create_folders(current_folder, structure=None, created_paths=None):
+def createFolders(current_folder, structure=None, created_paths=None):
     if created_paths is None:
         created_paths = []
         
@@ -127,11 +124,11 @@ def create_folders(current_folder, structure=None, created_paths=None):
 
         # Recursively create subfolders
         if isinstance(subfolders, dict) and subfolders:
-            create_folders(folder_path, subfolders, created_paths)
+            createFolders(folder_path, subfolders, created_paths)
     
     return created_paths
 
-def delete_folders():
+def deleteFolders():
     def handle_remove_readonly(func, path, exc_info):
         """
         Error handler for readonly files and folders.
@@ -176,22 +173,17 @@ def delete_folders():
     
     time.sleep(1)
 
-def export_data(folder, filename, variable):
+def exportData(folder, filename, variable):
     file_path = Path(data_store) / folder / filename
     with open(file_path, "w") as outfile:
         json.dump(variable, outfile, indent=4)
-
-def import_data(folder,filename):
-    file_path = Path(data_store) / folder / filename
-    with open(file_path, "r") as file:
-        return json.load(file)
 
 def load(folder,filename,variable_name):
     file_path = Path(data_store) / folder / filename
     with open(file_path,"r") as file:
         globals()[variable_name] = json.load(file)
 
-def google_auth():
+def googleAuth():
     try:
         # 1. Try Application Default Credentials (Cloud Run)
         credentials, project_id = default()
@@ -221,10 +213,10 @@ def google_auth():
 
         raise Exception("❌ No valid authentication method found")
 
-def debug_check(debug):
+def debugCheck(debug):
     if debug:
         if testing is False:
-            create_folders(current_folder)     
+            createFolders(current_folder)     
         extended_update = False                                          
         Data_export = True
     
@@ -234,17 +226,17 @@ def debug_check(debug):
                     
     return extended_update,Data_export
 
-def data_store_location(country):
+def dataStoreLocation(country):
     folder_name = f"Data - {country.upper()}"
     return os.path.join(current_folder, "Data Store", folder_name)
 
-def get_secret(secret_id, version_id="latest"):
+def getSecret(secret_id, version_id="latest"):
     client = secretmanager.SecretManagerServiceClient(credentials=creds)
     name = f"projects/{project_Id}/secrets/{secret_id}/versions/{version_id}"
     response = client.access_secret_version(request={"name": name})
     return response.payload.data.decode("UTF-8")
 
-def load_keys(country):
+def loadKeys(country):
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"    Gathering Security Information ({now_str})")
     print(f"        Loading Security Keys ({now_str})")
@@ -261,7 +253,7 @@ def load_keys(country):
         "certfile": f"{country}_cert_pem",
     }
 
-    secrets = {k: get_secret(v) for k, v in secret_ids.items()}
+    secrets = {k: getSecret(v) for k, v in secret_ids.items()}
 
     return (
         secrets["client_id"],
@@ -274,7 +266,7 @@ def load_keys(country):
         secrets["certfile"],
     )
 
-def load_ssl(certfile_content, keyfile_content):
+def loadSsl(certfile_content, keyfile_content):
     """
     Create temporary files for the certificate and keyfile contents.
     
@@ -304,7 +296,7 @@ def load_ssl(certfile_content, keyfile_content):
         os.unlink(temp_keyfile.name)
         raise e
 
-def adp_bearer(client_id,client_secret,certfile,keyfile):
+def adpBearer(client_id,client_secret,certfile,keyfile):
     adp_token_url = 'https://accounts.adp.com/auth/oauth/v2/token'                                                                                          
 
     adp_token_data = {
@@ -322,7 +314,7 @@ def adp_bearer(client_id,client_secret,certfile,keyfile):
 
     return access_token
 
-def cascade_bearer (cascade_API_id):
+def cascadeBearer (cascade_API_id):
     cascade_token_url='https://api.iris.co.uk/oauth2/v1/token'
     
     cascade_token_data = {
@@ -343,7 +335,7 @@ def cascade_bearer (cascade_API_id):
 
 # API Calls
 
-def api_count_adp(page_size,url,headers,type):
+def apiCountAdp(page_size,url,headers,type):
 
     api_count_params = {
             "$filter": f"workers/workAssignments/assignmentStatus/statusCode/codeValue eq '{type}'",
@@ -357,7 +349,7 @@ def api_count_adp(page_size,url,headers,type):
 
     return api_calls
 
-def api_call(page_size,skip_param,api_url,api_headers,type):
+def apiCall(page_size,skip_param,api_url,api_headers,type):
     
     api_params = {
     "$filter": f"workers/workAssignments/assignmentStatus/statusCode/codeValue eq '{type}'",
@@ -370,14 +362,14 @@ def api_call(page_size,skip_param,api_url,api_headers,type):
 
     return api_response    
 
-def api_count_cascade(api_response,page_size):
+def apiCountCascade(api_response,page_size):
     response_data = api_response.json()
     total_number = response_data['@odata.count']
     api_calls = math.ceil(total_number / page_size)
 
     return api_calls
 
-def api_call_cascade(cascade_token,api_url,api_params=None,api_data=None):
+def apiCallCascade(cascade_token,api_url,api_params=None,api_data=None):
     cascade_api_headers = {
     'Authorization': f'Bearer {cascade_token}',
     }
@@ -389,7 +381,7 @@ def api_call_cascade(cascade_token,api_url,api_params=None,api_data=None):
 
 # Global Data Calls
 
-def status_type(status):
+def statusType(status):
     status_map = {
         "active": "A",
         "terminated": "T",
@@ -397,7 +389,7 @@ def status_type(status):
     }
     return status_map.get(status)
 
-def GET_workers_adp():
+def getWorkersAdp():
 
     global adp_active,adp_terminated,adp_leave
     adp_active = []
@@ -407,7 +399,7 @@ def GET_workers_adp():
     for status in ["active","leave","terminated"]:
         print (f"       Downloading ADP Staff with the status - {status}")
                
-        type = status_type (status)
+        type = statusType (status)
         
         page_size = 100
         
@@ -416,11 +408,11 @@ def GET_workers_adp():
             'Accept':"application/json;masked=false"
             }
         
-        api_calls = api_count_adp(page_size,adp_workers,api_headers,type)
+        api_calls = apiCountAdp(page_size,adp_workers,api_headers,type)
         for i in range(api_calls):
             skip_param = i * page_size
 
-            api_response = api_call(page_size,skip_param,adp_workers,api_headers,type)
+            api_response = apiCall(page_size,skip_param,adp_workers,api_headers,type)
 
             if api_response.status_code == 200:
                 json_data = api_response.json()
@@ -436,11 +428,11 @@ def GET_workers_adp():
                 continue
 
         if Data_export:
-            export_data("002 - Security and Global", f"001 - ADP (Data Out - {status}).json", globals()[f"adp_{status}"])    
+            exportData("002 - Security and Global", f"001 - ADP (Data Out - {status}).json", globals()[f"adp_{status}"])    
 
     return adp_active, adp_leave, adp_terminated
 
-def GET_workers_cascade():
+def getWorkersCascade():
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("    Retrieving current Personal Data from Cascade HR (" + time_now + ")")
     global cascade_responses
@@ -449,8 +441,8 @@ def GET_workers_cascade():
 
     page_size = 200
 
-    api_response = api_call_cascade(cascade_token,cascade_workers,None)
-    api_calls = api_count_cascade(api_response,page_size)                
+    api_response = apiCallCascade(cascade_token,cascade_workers,None)
+    api_calls = apiCountCascade(api_response,page_size)                
 
     for i in range(api_calls):
             skip_param = i * page_size
@@ -459,7 +451,7 @@ def GET_workers_cascade():
                 "$skip": skip_param
             } 
             
-            api_response = api_call_cascade(cascade_token,cascade_workers,api_params)
+            api_response = apiCallCascade(cascade_token,cascade_workers,api_params)
 
             if api_response.status_code == 200:
                 json_data = api_response.json()
@@ -469,11 +461,11 @@ def GET_workers_cascade():
     cascade_responses = [record for record in cascade_responses if record.get('DisplayId') is not None]
 
     if Data_export:
-        export_data("002 - Security and Global", "001 - Cascade Raw Out.json", cascade_responses)    
+        exportData("002 - Security and Global", "001 - Cascade Raw Out.json", cascade_responses)    
 
     return cascade_responses
 
-def get_hierarchy_nodes(hierarchy_ids,url,headers):
+def getHierarchyNodes(hierarchy_ids,url,headers):
         hierarchy_nodes = []
         hierarchy_id_nodes = []
 
@@ -500,7 +492,7 @@ def get_hierarchy_nodes(hierarchy_ids,url,headers):
 
         return hierarchy_nodes, hierarchy_id_nodes
     
-def GET_hierarchy_list(country): 
+def getHierarchyList(country): 
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("    Retrieving Job Hierarchy Nodes (" + time_now + ")")
 
@@ -529,19 +521,19 @@ def GET_hierarchy_list(country):
 
         # Recursive call to get all descendant nodes
         while hierarchy_id_nodes:
-            new_nodes, new_id_nodes = get_hierarchy_nodes(hierarchy_id_nodes,api_url,api_headers)
+            new_nodes, new_id_nodes = getHierarchyNodes(hierarchy_id_nodes,api_url,api_headers)
             hierarchy_nodes.extend(new_nodes)
             hierarchy_id_nodes = new_id_nodes
     else:
         print(f"Failed to retrieve data: {response.status_code}")
 
     if Data_export:
-        export_data("002 - Security and Global","002 - Hierarchy Nodes.json", hierarchy_nodes)    
+        exportData("002 - Security and Global","002 - Hierarchy Nodes.json", hierarchy_nodes)    
             
     
     return hierarchy_nodes
 
-def find_active_job_position(worker):
+def findActiveJobPosition(worker):
     active_job_position = None
 
     work_assignments = worker.get("workAssignments", [{}])
@@ -551,7 +543,7 @@ def find_active_job_position(worker):
             continue
     return active_job_position
 
-def find_cascade_id_and_cont_service(ADP_identifier):
+def findCascadeIdAndContService(ADP_identifier):
     CascadeID = Cascade_full = contServiceCascade = None
     #print (ADP_identifier)
     for entry in cascade_responses:
@@ -569,7 +561,7 @@ def find_cascade_id_and_cont_service(ADP_identifier):
             break  # Exit loop once a match is found
     return CascadeID,Cascade_full,contServiceCascade
 
-def find_hierarchy_id(job_code,job_name,hierarchy_library): 
+def findHierarchyId(job_code,job_name,hierarchy_library): 
     hierarchy = None 
 
     # First pass: try exact match (code + name) 
@@ -587,12 +579,12 @@ def find_hierarchy_id(job_code,job_name,hierarchy_library):
            
     return hierarchy
 
-def ID_generator(country,adp_responses):
+def IDGenerator(country,adp_responses):
 
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("    Creating an ID library (" + time_now + ")")
 
-    xlsx_in_memory = load_xlsx_from_bucket("Hierarchy")
+    xlsx_in_memory = loadXlsxFromBucket("Hierarchy")
     df = pd.read_excel(xlsx_in_memory, sheet_name=f"{country} Conversion")
     df = df.replace({np.nan: None})
     df['adp_code'] = df['adp_code'].astype(str)
@@ -602,10 +594,10 @@ def ID_generator(country,adp_responses):
     ID_library = []
 
     if Data_export:
-        export_data("002 - Security and Global",f"002 - {country} Hierarchy.json", hierarchy_library)    
+        exportData("002 - Security and Global",f"002 - {country} Hierarchy.json", hierarchy_library)    
 
     for worker in adp_responses:
-        active_job_position = find_active_job_position(worker)
+        active_job_position = findActiveJobPosition(worker)
 
         id_value = worker["associateOID"]
         contServiceADP = worker["workAssignments"][0]["hireDate"]
@@ -618,16 +610,19 @@ def ID_generator(country,adp_responses):
         job_name = None
         CascadeID = None
 
+        job_name = worker["workAssignments"][active_job_position]["jobCode"].get("codeValue","")
+
+
         if country == "usa":
             job_code = worker["workAssignments"][active_job_position]["homeOrganizationalUnits"][1]["nameCode"]["codeValue"]
 
         elif country == "can":
             job_code = worker["workAssignments"][active_job_position]["homeOrganizationalUnits"][0]["nameCode"]["codeValue"]
-            job_name = worker["workAssignments"][active_job_position]["jobCode"]["codeValue"]
+            #job_name = worker["workAssignments"][active_job_position]["jobCode"]["codeValue"]
 
-        CascadeID, Cascade_full, contServiceCascade = find_cascade_id_and_cont_service(ADP_identifier)
+        CascadeID, Cascade_full, contServiceCascade = findCascadeIdAndContService(ADP_identifier)
 
-        hierarchy_id = find_hierarchy_id(job_code, job_name, hierarchy_library)
+        hierarchy_id = findHierarchyId(job_code, job_name, hierarchy_library)
 
         if CascadeID is None:
             date = formatted_date
@@ -653,12 +648,12 @@ def ID_generator(country,adp_responses):
         ID_library.append(transformed_record)
 
     if Data_export:
-        export_data("002 - Security and Global","003 - ID_library.json", ID_library)
+        exportData("002 - Security and Global","003 - ID_library.json", ID_library)
     return ID_library
     
 # Cascade to ADP (run-type-1)
 #---------------------------------------- Support Functions
-def create_cascadeID_update_list(ID_library, cascade, adp):
+def createCascadeidUpdateList(ID_library, cascade, adp):
     cascade_exists_in_library = False
 
     for record in ID_library:
@@ -681,7 +676,7 @@ def create_cascadeID_update_list(ID_library, cascade, adp):
 
         return transformed_record
 #---------------------------------------- Main Functions
-def whats_in_ADP(adp_responses, ID_library,c):
+def whatsInAdp(adp_responses, ID_library,c):
     ct_POST_cascade_id = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Finding Id's that are missing on Cascade (" + ct_POST_cascade_id + ")")
 
@@ -701,16 +696,16 @@ def whats_in_ADP(adp_responses, ID_library,c):
         if c == "can":
             cascade = worker["customFieldGroup"]["stringFields"][0].get("stringValue", "")
 
-        transformed_record = create_cascadeID_update_list(ID_library, cascade, ADP_number)
+        transformed_record = createCascadeidUpdateList(ID_library, cascade, ADP_number)
         if transformed_record is not None:  # Only append if we got a valid record back
             ID_responses.append(transformed_record)
 
     if Data_export:
-        export_data("006 - CascadeId to ADP","003 - IDs_updating.json", ID_responses)    
+        exportData("006 - CascadeId to ADP","003 - IDs_updating.json", ID_responses)    
 
     return ID_responses
 
-def upload_cascade_Ids_to_ADP(CascadeId_to_upload,country):
+def uploadCascadeidsToAdp(CascadeId_to_upload,country):
     ct_POST_cascade_id = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Updating Cascade ID's on WFN (" + ct_POST_cascade_id + ")")
 
@@ -769,16 +764,16 @@ def upload_cascade_Ids_to_ADP(CascadeId_to_upload,country):
         else:
             print("        "+f'Response Code: {req.status_code}')
 #---------------------------------------- Top Level Function
-def run_type_1():
+def runType1():
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("    Pushing Cascade Id's back to ADP (" + time_now + ")")
 
-    CascadeId_to_upload             = whats_in_ADP(adp_responses, ID_library,c)
-    upload_cascade_Ids_to_ADP(CascadeId_to_upload,c)
+    CascadeId_to_upload             = whatsInAdp(adp_responses, ID_library,c)
+    uploadCascadeidsToAdp(CascadeId_to_upload,c)
 
 # Delete/Update Absences (run-type-2)
 #---------------------------------------- Top Level Function               
-def load_from_bucket(variable):
+def loadFromBucket(variable):
     client = storage.Client(credentials=creds, project=project_Id)
     bucket = client.bucket("event_list_objects")
     blob = bucket.blob(f"{variable}.json")
@@ -788,8 +783,8 @@ def load_from_bucket(variable):
 
     return string_list
 
-def create_absences_reasons():
-    xlsx_in_memory = load_xlsx_from_bucket("Hierarchy")
+def createAbsencesReasons():
+    xlsx_in_memory = loadXlsxFromBucket("Hierarchy")
     df = pd.read_excel(xlsx_in_memory, sheet_name=f"{c} Absences")
                           
     if c == "usa":
@@ -806,11 +801,11 @@ def create_absences_reasons():
             item["Id"] = str(item["Id"])
     
     if Data_export:
-        export_data("005 - Absences to Cascade",f"001 - {c} absence reasons.json", absence_reasons)    
+        exportData("005 - Absences to Cascade",f"001 - {c} absence reasons.json", absence_reasons)    
     
     return absence_reasons
 
-def get_cascade_id(CascadeId,ID_library):
+def getCascadeId(CascadeId,ID_library):
     for record in ID_library:
         if record["CascadeId"] == CascadeId:
             Cascade_full = record["Cascade_full"]
@@ -819,7 +814,7 @@ def get_cascade_id(CascadeId,ID_library):
     
     return Cascade_full,AOID
 
-def get_absences_adp(AOID):
+def getAbsencesAdp(AOID):
     api_url = "https://api.adp.com/time/v2/workers/" + AOID + "/time-off-details/time-off-requests"
     api_headers = {
         'Authorization': f'Bearer {access_token}',
@@ -837,11 +832,11 @@ def get_absences_adp(AOID):
     adp_response = api_response.json()
 
     if Data_export:
-        export_data("005 - Absences to Cascade","002 - ADP Raw absence response (Individual).json", adp_response)    
+        exportData("005 - Absences to Cascade","002 - ADP Raw absence response (Individual).json", adp_response)    
 
     return adp_response
 
-def convert_ADP_absences_to_cascade_format(adp_response,absence_reasons,Cascade_full,AOID,ninety_days_ago):
+def convertAdpAbsencesToCascadeFormat(adp_response,absence_reasons,Cascade_full,AOID,ninety_days_ago):
     data = adp_response
     output = {"Pending": [], "Approved": [], "Cancelled": []}
 
@@ -920,19 +915,19 @@ def convert_ADP_absences_to_cascade_format(adp_response,absence_reasons,Cascade_
     filtered_extracted_records = [record for record in extracted_records if datetime.strptime(record["StartDate"], "%Y-%m-%d") >= ninety_days_ago]
 
     if Data_export:
-        export_data("005 - Absences to Cascade","003 - ADP absences - categorised.json", final_output)    
-        export_data("005 - Absences to Cascade","003a - ADP absences - Approved.json", filtered_extracted_records)    
+        exportData("005 - Absences to Cascade","003 - ADP absences - categorised.json", final_output)    
+        exportData("005 - Absences to Cascade","003a - ADP absences - Approved.json", filtered_extracted_records)    
 
 
     return filtered_extracted_records
 
-def cascade_absences(Cascade_full,absences_from):
+def cascadeAbsences(Cascade_full,absences_from):
 
     cascade_responses = []
     api_params = {
         "$filter": "EmployeeId eq '"+Cascade_full+"' and startDate ge "+absences_from,             #add this to filter to the last 90 days
     }
-    api_response = api_call_cascade(cascade_token,cascade_absences_url,api_params,None)
+    api_response = apiCallCascade(cascade_token,cascade_absences_url,api_params,None)
     
     if api_response.status_code == 200:
         json_data = api_response.json()
@@ -950,8 +945,8 @@ def cascade_absences(Cascade_full,absences_from):
             "EmployeeId": entry["EmployeeId"],
             "AbsenceReasonId": entry["AbsenceReasonId"],
             "Narrative": entry["Narrative"],
-            "StartDate": convert_datetime_to_date(entry["StartDate"]),
-            "EndDate": convert_datetime_to_date(entry["EndDate"]),
+            "StartDate": convertDatetimeToDate(entry["StartDate"]),
+            "EndDate": convertDatetimeToDate(entry["EndDate"]),
         }
         for entry in combined_data
     ]
@@ -959,12 +954,12 @@ def cascade_absences(Cascade_full,absences_from):
     current_absence_id_cascade = [entry["id"] for entry in updated_json_data]
 
     if Data_export:
-        export_data("005 - Absences to Cascade","005 - Cascadecurrent.json",updated_json_data)    
-        export_data("005 - Absences to Cascade","005a - Cascadecurrent_Id.json",current_absence_id_cascade)    
+        exportData("005 - Absences to Cascade","005 - Cascadecurrent.json",updated_json_data)    
+        exportData("005 - Absences to Cascade","005a - Cascadecurrent_Id.json",current_absence_id_cascade)    
     
     return  updated_json_data,current_absence_id_cascade
 
-def combine_json_files_for_POST(current_absence_id_cascade,adp_current,cascade_current):
+def combineJsonFilesForPost(current_absence_id_cascade,adp_current,cascade_current):
     update_records = []
     update_ids = []
     unchanged_records = []
@@ -1012,17 +1007,17 @@ def combine_json_files_for_POST(current_absence_id_cascade,adp_current,cascade_c
     delete_ids = list(result_set)
 
     if Data_export:
-        export_data("005 - Absences to Cascade","006 - Unchanged.json",unchanged_records)    
-        export_data("005 - Absences to Cascade","006a - Unchanged id.json",unchanged_ids)    
-        export_data("005 - Absences to Cascade","007 - Update.json",update_records)    
-        export_data("005 - Absences to Cascade","007a - Update (reordered).json",Update_transformed)    
-        export_data("005 - Absences to Cascade","007b - Update id.json",update_ids)    
-        export_data("005 - Absences to Cascade","008 - New.json",new_records)    
-        export_data("005 - Absences to Cascade","008 - New.json",delete_ids)    
+        exportData("005 - Absences to Cascade","006 - Unchanged.json",unchanged_records)    
+        exportData("005 - Absences to Cascade","006a - Unchanged id.json",unchanged_ids)    
+        exportData("005 - Absences to Cascade","007 - Update.json",update_records)    
+        exportData("005 - Absences to Cascade","007a - Update (reordered).json",Update_transformed)    
+        exportData("005 - Absences to Cascade","007b - Update id.json",update_ids)    
+        exportData("005 - Absences to Cascade","008 - New.json",new_records)    
+        exportData("005 - Absences to Cascade","008 - New.json",delete_ids)    
 
     return new_records, Update_transformed, delete_ids, update_ids
 
-def POST(new_records,Cascade_full):
+def PostAbsences(new_records,Cascade_full):
     output=[]
 
     if not new_records:
@@ -1065,14 +1060,14 @@ def POST(new_records,Cascade_full):
             time.sleep(0.2)
 
         if Data_export:
-            export_data("005 - Absences to Cascade","010 - ADPabsences.json",output)    
+            exportData("005 - Absences to Cascade","010 - ADPabsences.json",output)    
         
     return (output)
 
-def DELETE(delete_ids):
+def DeleteAbsences(delete_ids):
 
     if Data_export:
-        export_data("005 - Absences to Cascade","011 - All deleted -ID.json",delete_ids)    
+        exportData("005 - Absences to Cascade","011 - All deleted -ID.json",delete_ids)    
 
     for ID_to_delete in delete_ids:
         api_url = f'https://api.iris.co.uk/hr/v2/attendance/absences/{ID_to_delete}'
@@ -1097,31 +1092,31 @@ def DELETE(delete_ids):
     
         time.sleep(0.6)  
 #---------------------------------------- Top Level Function               
-def run_type_2(ID_library):
+def runType2(ID_library):
 
     ninety_days_ago = datetime.now() - timedelta(days=90)                                                   # ADP only returns last 90, this allows the same for cascade
     absences_from = ninety_days_ago.strftime('%Y-%m-%dT%H:%M:%S.000Z')
 
-    absence_reasons = create_absences_reasons()
+    absence_reasons = createAbsencesReasons()
 
     for record in ID_library:
         CascadeId = record["CascadeId"]
         print(f"Updating absences for {CascadeId}")
-        Cascade_full, AOID = get_cascade_id(CascadeId,ID_library)            
+        Cascade_full, AOID = getCascadeId(CascadeId,ID_library)            
         
         try:
-            adp_response = get_absences_adp(AOID)                               #Downloads the absences in the last 90 days for a given staff member
+            adp_response = getAbsencesAdp(AOID)                               #Downloads the absences in the last 90 days for a given staff member
 
             if len(adp_response) == 0:
                 print(f"        No booked absences for {CascadeId}")
                 continue  # If there are no absences, skip to the next record                
             else:
-                adp_current = convert_ADP_absences_to_cascade_format(adp_response,absence_reasons,Cascade_full,AOID,ninety_days_ago)              #Converts ADP absences into Cascade format
-                cascade_current, current_absence_id_cascade = cascade_absences(Cascade_full,absences_from)  # Pulls list of current absences
-                new_records, Update_transformed, delete_ids, update_ids = combine_json_files_for_POST(current_absence_id_cascade,adp_current,cascade_current)  # Compares adp and cascade and removes any that are already in cascade
+                adp_current = convertAdpAbsencesToCascadeFormat(adp_response,absence_reasons,Cascade_full,AOID,ninety_days_ago)              #Converts ADP absences into Cascade format
+                cascade_current, current_absence_id_cascade = cascadeAbsences(Cascade_full,absences_from)  # Pulls list of current absences
+                new_records, Update_transformed, delete_ids, update_ids = combineJsonFilesForPost(current_absence_id_cascade,adp_current,cascade_current)  # Compares adp and cascade and removes any that are already in cascade
 
-            DELETE(delete_ids)  # Deletes cancelled absences
-            POST(new_records,Cascade_full)  # Creates new absences
+            DeleteAbsences(delete_ids)  # Deletes cancelled absences
+            PostAbsences(new_records,Cascade_full)  # Creates new absences
 
         except json.JSONDecodeError as e:
             if str(e) == "Expecting value: line 1 column 1 (char 0)":
@@ -1136,14 +1131,14 @@ def run_type_2(ID_library):
 
 # Update Personal Details (Run Type 3)
 #---------------------------------------Support Functions
-def make_api_request(DisplayId):
+def makeApiRequest(DisplayId):
 
     api_params = {
         "$filter": f"DisplayId eq '{DisplayId}'",
         "$select": "DisplayId,Id,ContinuousServiceDate",
     }                
     
-    api_response = api_call_cascade(cascade_token,cascade_workers, api_params)
+    api_response = apiCallCascade(cascade_token,cascade_workers, api_params)
     response_data = api_response.json()       
     cascade_id_full = response_data['value'][0]['Id']
     cont_service_raw = response_data['value'][0]['ContinuousServiceDate']
@@ -1152,7 +1147,7 @@ def make_api_request(DisplayId):
     time.sleep(0.6)                                               #forces a wait to eliminate 429 errors
     return cascade_id_full, cont_service
 
-def load_csv_from_bucket(name):
+def loadCsvFromBucket(name):
     bucket_name = "event_list_objects"
     file_name = f"{name}.csv"
 
@@ -1174,7 +1169,7 @@ def load_csv_from_bucket(name):
 
     return result
 
-def load_xlsx_from_bucket(name):
+def loadXlsxFromBucket(name):
     bucket_name = "event_list_objects"
     file_name = f"{name}.xlsx"
 
@@ -1190,17 +1185,7 @@ def load_xlsx_from_bucket(name):
 
     return xlsx_file
 
-def find_active_job_position(worker):
-    active_job_position = None
-
-    work_assignments = worker.get("workAssignments", [{}])
-    for index, assignment in enumerate(work_assignments):
-        if assignment.get("primaryIndicator", True):
-            active_job_position = index
-            continue
-    return active_job_position
-
-def find_cascade_personal_data_from_ID(ADP_id, ID_library, display_id,start_date):
+def findCascadePersonalDataFromId(ADP_id, ID_library, display_id,start_date):
     contServiceSplit = start_date  # Default value if no record is found
     Id = None
    
@@ -1218,7 +1203,7 @@ def find_cascade_personal_data_from_ID(ADP_id, ID_library, display_id,start_date
     
     return contServiceSplit,Id
 
-def convert_us_language_to_uk(workingStatus,end_date,mobileOwner):
+def convertUsaTerminologyToUkTerminology(workingStatus,end_date,mobileOwner):
     if workingStatus == "Active":
         workingStatus = "Current"
     if workingStatus == "Inactive":                     #This may be removed later - discussion needed AP/KG
@@ -1236,7 +1221,7 @@ def convert_us_language_to_uk(workingStatus,end_date,mobileOwner):
 
     return workingStatus,end_date,mobileOwner
 
-def find_cont_service(contServiceSplit,start_date):
+def findContService(contServiceSplit,start_date):
     employment_start_date = datetime.strptime(start_date, "%Y-%m-%d")
     continuous_service_date = datetime.strptime(contServiceSplit, "%Y-%m-%d")
        
@@ -1245,11 +1230,11 @@ def find_cont_service(contServiceSplit,start_date):
     
     return contServiceSplit
 
-def convert_datetime_to_date(datetime_str):
+def convertDatetimeToDate(datetime_str):
     dt_object = datetime.strptime(datetime_str, "%Y-%m-%dT%H:%M:%SZ")
     return dt_object.strftime("%Y-%m-%d")
 
-def create_initials(preferred,firstname,other_name):
+def createInitials(preferred,firstname,other_name):
     if preferred:
         initials = preferred[0].upper()
     else:
@@ -1260,14 +1245,14 @@ def create_initials(preferred,firstname,other_name):
     
     return initials
 #---------------------------------------Main Functions
-def convert_adp_to_cascade_form(records,suffix,terminations,ID_library,x_months_ago=None):                         
+def convertAdpToCascadeForm(records,suffix,terminations,ID_library,x_months_ago=None):                         
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Converting the adp data to the cascade form (" + time_now+ ")")
 
     output = []       
         
     for worker in records:
-        active_job_position = find_active_job_position(worker)
+        active_job_position = findActiveJobPosition(worker)
         gender = worker["person"]["genderCode"].get("shortName",None)
         salutation = worker["person"]["legalName"].get("preferredSalutations",[{}])[0].get("salutationCode",{}).get("shortName")
         firstName = worker["person"]["legalName"]["givenName"]
@@ -1298,10 +1283,10 @@ def convert_adp_to_cascade_form(records,suffix,terminations,ID_library,x_months_
         leave_reason = next((termination.get("Cascade_Reason") for termination in terminations if termination.get("ADP_Code") == leave_reason_code), None)
 
         #Change any of the language from ADP to Iris HR        
-        workingStatus,end_date,mobileOwner = convert_us_language_to_uk(workingStatus,end_date,mobileOwner)
-        contServiceSplit,Id = find_cascade_personal_data_from_ID(ADP_id,ID_library,display_id,start_date)
-        contServiceSplit = find_cont_service(contServiceSplit,start_date)
-        initials = create_initials(preffered,firstName,other_name)
+        workingStatus,end_date,mobileOwner = convertUsaTerminologyToUkTerminology(workingStatus,end_date,mobileOwner)
+        contServiceSplit,Id = findCascadePersonalDataFromId(ADP_id,ID_library,display_id,start_date)
+        contServiceSplit = findContService(contServiceSplit,start_date)
+        initials = createInitials(preffered,firstName,other_name)
 
         transformed_record = {
             "DisplayId": display_id,
@@ -1377,11 +1362,11 @@ def convert_adp_to_cascade_form(records,suffix,terminations,ID_library,x_months_
         
         # Save individual dataset files
         if Data_export:
-            export_data("003 - Personal to Cascade",f"001 - ADP_to_cascade_{suffix}.json", output)    
+            exportData("003 - Personal to Cascade",f"001 - ADP_to_cascade_{suffix}.json", output)    
     
     return output
 
-def cascade_rejig_personal(cascade_responses):
+def cascadeRejigPersonal(cascade_responses):
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Faffling about with the order of Cascade to allow comparison (" + time_now + ")")
 
@@ -1401,11 +1386,11 @@ def cascade_rejig_personal(cascade_responses):
                 "PayrollId": entry.get("PayrollId", ""),
                 "TaxCode": entry.get("TaxCode", ""),
                 "IncludeInPayroll": entry.get("IncludeInPayroll", True),
-                "EmploymentStartDate": convert_datetime_to_date(entry["EmploymentStartDate"]) if entry["EmploymentStartDate"] is not None else None,
-                "EmploymentLeftDate": convert_datetime_to_date(entry["EmploymentLeftDate"]) if entry["EmploymentLeftDate"] is not None else None,
-                "ContinuousServiceDate": convert_datetime_to_date(entry["ContinuousServiceDate"]) if entry["ContinuousServiceDate"] is not None else None,
-                "DateOfBirth": convert_datetime_to_date(entry["DateOfBirth"]) if entry["DateOfBirth"] is not None else None,
-                "LastWorkingDate": convert_datetime_to_date(entry["LastWorkingDate"]) if entry["LastWorkingDate"] is not None else None,
+                "EmploymentStartDate": convertDatetimeToDate(entry["EmploymentStartDate"]) if entry["EmploymentStartDate"] is not None else None,
+                "EmploymentLeftDate": convertDatetimeToDate(entry["EmploymentLeftDate"]) if entry["EmploymentLeftDate"] is not None else None,
+                "ContinuousServiceDate": convertDatetimeToDate(entry["ContinuousServiceDate"]) if entry["ContinuousServiceDate"] is not None else None,
+                "DateOfBirth": convertDatetimeToDate(entry["DateOfBirth"]) if entry["DateOfBirth"] is not None else None,
+                "LastWorkingDate": convertDatetimeToDate(entry["LastWorkingDate"]) if entry["LastWorkingDate"] is not None else None,
                 "Gender": entry.get("Gender", ""),
                 "Ethnicity": entry.get("Ethnicity", ""),
                 "Nationality": entry.get("Nationality", ""),
@@ -1423,12 +1408,12 @@ def cascade_rejig_personal(cascade_responses):
     ]
 
     if Data_export:
-        export_data("003 - Personal to Cascade","002 - Cascade_reordered.json", cascade_reordered)    
+        exportData("003 - Personal to Cascade","002 - Cascade_reordered.json", cascade_reordered)    
     
 
     return cascade_reordered
 
-def combine_json_files(adp_to_cascade_terminated,adp_to_cascade,cascade_reordered):
+def combineJsonFiles(adp_to_cascade_terminated,adp_to_cascade,cascade_reordered):
     ct_combining_personal = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Generating a list of files that need updating (" + ct_combining_personal + ")")
     
@@ -1465,7 +1450,7 @@ def combine_json_files(adp_to_cascade_terminated,adp_to_cascade,cascade_reordere
         
         if display_id:
             # Call the API function
-            new_id,cont_service = make_api_request(display_id)
+            new_id,cont_service = makeApiRequest(display_id)
             
             # Create a copy of the record and update the Id
             updated_record = record.copy()
@@ -1487,13 +1472,13 @@ def combine_json_files(adp_to_cascade_terminated,adp_to_cascade,cascade_reordere
             del entry ['Initials']
     
     if Data_export:
-        export_data("003 - Personal to Cascade","003a - Non Matching records.json", unique_entries)    
-        export_data("003 - Personal to Cascade","003b - Updated Records.json", update_personal)    
-        export_data("003 - Personal to Cascade","003c - New Starters.json", new_starters)    
-        export_data("003 - Personal to Cascade","003d - Terminated Staff.json", processed_unterminated_records)    
+        exportData("003 - Personal to Cascade","003a - Non Matching records.json", unique_entries)    
+        exportData("003 - Personal to Cascade","003b - Updated Records.json", update_personal)    
+        exportData("003 - Personal to Cascade","003c - New Starters.json", new_starters)    
+        exportData("003 - Personal to Cascade","003d - Terminated Staff.json", processed_unterminated_records)    
     return update_personal, new_starters, processed_unterminated_records
 
-def PUT_cascade_workers_personal(list_of_staff):
+def PutCascadeWorkersPersonal(list_of_staff):
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Updating Staff changes (" + time_now + ")")                         
     
@@ -1528,7 +1513,7 @@ def PUT_cascade_workers_personal(list_of_staff):
             print("             " + f'Data Transfer for {FirstName} {LastName} - {display_id} has failed. Response Code: {response.status_code}')           
         time.sleep(0.6) 
     
-def POST_new_starters(new_starters): 
+def PostNewStarters(new_starters): 
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Adding new staff (" + time_now + ")")                              
     for entry in new_starters:
@@ -1539,7 +1524,7 @@ def POST_new_starters(new_starters):
         transformed_record = entry
         
         if Data_export:  #Just shows the current one uploading
-            export_data("003 - Personal to Cascade","005 - New Start.json", transformed_record)    
+            exportData("003 - Personal to Cascade","005 - New Start.json", transformed_record)    
 
         headers = {
             'Authorization': f'Bearer {cascade_token}',
@@ -1555,25 +1540,25 @@ def POST_new_starters(new_starters):
             print("             "+f'Data Transfer for New Starter ({FirstName} {LastName}) has failed. Response Code: {response.status_code}')           
         time.sleep(0.6)  
 #---------------------------------------- Top Level Function   
-def run_type_3():
+def runType3():
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("    Updating personal details on Cascade (" + time_now + ")")
 
     countryName = c.upper()
-    terminations = load_csv_from_bucket(f"{countryName}_termination_mapping")
+    terminations = loadCsvFromBucket(f"{countryName}_termination_mapping")
 
-    adp_to_cascade                                              = convert_adp_to_cascade_form(adp_responses,"all",terminations,ID_library)
-    adp_to_cascade_terminated                                   = convert_adp_to_cascade_form(adp_terminated,"terminated",terminations,ID_library,x_months_ago)
+    adp_to_cascade                                              = convertAdpToCascadeForm(adp_responses,"all",terminations,ID_library)
+    adp_to_cascade_terminated                                   = convertAdpToCascadeForm(adp_terminated,"terminated",terminations,ID_library,x_months_ago)
 
-    cascade_reordered                                           = cascade_rejig_personal(cascade_responses)
-    records_to_upload, new_starters, unterminated_staff         = combine_json_files(adp_to_cascade_terminated,adp_to_cascade,cascade_reordered)
-    PUT_cascade_workers_personal(records_to_upload)
-    PUT_cascade_workers_personal(unterminated_staff)
-    POST_new_starters(new_starters)   
+    cascade_reordered                                           = cascadeRejigPersonal(cascade_responses)
+    records_to_upload, new_starters, unterminated_staff         = combineJsonFiles(adp_to_cascade_terminated,adp_to_cascade,cascade_reordered)
+    PutCascadeWorkersPersonal(records_to_upload)
+    PutCascadeWorkersPersonal(unterminated_staff)
+    PostNewStarters(new_starters)   
 
 # Update Job Details (Run Type 4)
 #---------------------------------------Support Functions
-def create_params(page_size, skip_param):
+def createParams(page_size, skip_param):
     api_params = {
         "$filter": "EndDate eq null",
         "$top": page_size,
@@ -1581,7 +1566,7 @@ def create_params(page_size, skip_param):
     }
     return api_params 
 
-def find_contract(c,worker,active_job_position):
+def findContract(c,worker,active_job_position):
     base = worker["workAssignments"][active_job_position]
     if c == "usa":
         contract = (
@@ -1592,7 +1577,7 @@ def find_contract(c,worker,active_job_position):
         contract = base.get("workerTypeCode", {}).get("codeValue", "")
     return contract
 
-def search_ID_lib(ID_library,ADP_id):
+def searchIdLibrary(ID_library,ADP_id):
     for record in ID_library:
         if record["ADP_number"]==ADP_id:
             employee_id = record["Cascade_full"]
@@ -1600,8 +1585,8 @@ def search_ID_lib(ID_library,ADP_id):
             break
     return employee_id,hierarchy_id   
 
-def find_line_manager(ID_library,LM_AOID,employee_id):
-    xlsx_in_memory = load_xlsx_from_bucket("Hierarchy")
+def findLineManager(ID_library,LM_AOID,employee_id):
+    xlsx_in_memory = loadXlsxFromBucket("Hierarchy")
     df = pd.read_excel(xlsx_in_memory, sheet_name='JJ')
     reports_to_JJ = df['ID'].tolist()
 
@@ -1615,14 +1600,14 @@ def find_line_manager(ID_library,LM_AOID,employee_id):
                 line_manager = record["Cascade_full"]   
     return line_manager
 
-def choose_paybasis(paybasis_hourly):
+def choosePaybasis(paybasis_hourly):
     if paybasis_hourly is not None:
         paybasis = "Hourly"
     else:
         paybasis = "Yearly"
     return paybasis
 
-def round_salary(pay_hourly,pay_annual):
+def roundSalary(pay_hourly,pay_annual):
     if pay_hourly is not None:
         salary = float(pay_hourly)
     else:
@@ -1631,13 +1616,13 @@ def round_salary(pay_hourly,pay_annual):
     salary_rounded = round(salary,2)   
     return salary,salary_rounded
 
-def change_contract_language(contract):
+def changeContractLanguage(contract):
     permanent_codes = {"Full Time", "FT", "FTR", "FTOL", "Regular Full-Time","F"}
     if contract in permanent_codes:
         return "Permenent"
     return "Temporary"
 
-def find_change_reason(record,salary,hierarchy_id,line_manager,startDate):
+def findChangeReason(record,salary,hierarchy_id,line_manager,startDate):
     if str(record.get("Salary")) != str(salary):
         changeReason = "Change of Salary"
     elif str(record.get("HierarchyNodeId")) != str(hierarchy_id):
@@ -1650,7 +1635,7 @@ def find_change_reason(record,salary,hierarchy_id,line_manager,startDate):
         changeReason = record.get("ChangeReason")
     return changeReason
 
-def find_start_date(effective_date_wage,cascadeStart,effective_date_other):
+def findStartDate(effective_date_wage,cascadeStart,effective_date_other):
     wage = datetime.strptime(effective_date_wage, "%Y-%m-%d")
     cascade = datetime.strptime(cascadeStart, "%Y-%m-%d")
     other = datetime.strptime(effective_date_other, "%Y-%m-%d")
@@ -1659,7 +1644,7 @@ def find_start_date(effective_date_wage,cascadeStart,effective_date_other):
     startDate = startDate.strftime("%Y-%m-%d")
     return startDate
 
-def find_new_starters(records_to_add,ID_library):
+def findNewStarters(records_to_add,ID_library):
     employee_ids = {record["EmployeeId"] for record in records_to_add}
 
     new_start_jobs = [
@@ -1669,7 +1654,7 @@ def find_new_starters(records_to_add,ID_library):
     ]
     return new_start_jobs
 
-def find_name(employeeId):
+def findName(employeeId):
     match = next((item for item in cascade_responses if item["Id"] ==employeeId),None)
 
     if match:
@@ -1679,25 +1664,25 @@ def find_name(employeeId):
     return full_name
 
 #---------------------------------------Main Functions
-def cascade_current_jobs():
+def cascadeCurrentJobs():
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("    Retrieving current Personal Data from Cascade HR (" + time_now + ")")
     global cascade_jobs
 
     page_size = 200
 
-    api_params = create_params(page_size,0)
+    api_params = createParams(page_size,0)
 
-    api_response = api_call_cascade(cascade_token,cascade_jobs_url,api_params)
-    api_calls = api_count_cascade(api_response,page_size)
+    api_response = apiCallCascade(cascade_token,cascade_jobs_url,api_params)
+    api_calls = apiCountCascade(api_response,page_size)
 
     cascade_jobs = []
 
     for i in range(api_calls):
         skip_param = i * page_size
-        api_params = create_params(page_size,skip_param)
+        api_params = createParams(page_size,skip_param)
 
-        api_response = api_call_cascade(cascade_token,cascade_jobs_url,api_params)
+        api_response = apiCallCascade(cascade_token,cascade_jobs_url,api_params)
 
         if api_response.status_code == 200:
             json_data = api_response.json()
@@ -1705,11 +1690,11 @@ def cascade_current_jobs():
             cascade_jobs.extend(json_data)    
 
     if Data_export:
-        export_data("004 - Jobs to Cascade","001 - Cascade Jobs.json", cascade_jobs)    
+        exportData("004 - Jobs to Cascade","001 - Cascade Jobs.json", cascade_jobs)    
 
     return cascade_jobs
 
-def cascade_rejig_jobs(cascade_current_jobs):
+def cascadeRejigJobs(cascade_current_jobs):
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Faffling about with the order of Cascade to allow comparison (" + time_now + ")")
 
@@ -1717,8 +1702,8 @@ def cascade_rejig_jobs(cascade_current_jobs):
             {
             "JobTitle": entry.get("JobTitle"),
             "Classification": entry.get("Classification"),
-            "StartDate": convert_datetime_to_date(entry["StartDate"]) if entry["StartDate"] is not None else None,
-            "EndDate": convert_datetime_to_date(entry["EndDate"]) if entry["EndDate"] is not None else None,
+            "StartDate": convertDatetimeToDate(entry["StartDate"]) if entry["StartDate"] is not None else None,
+            "EndDate": convertDatetimeToDate(entry["EndDate"]) if entry["EndDate"] is not None else None,
             "WorkingCalendar": "40hrs Monday to friday",                                        #entry.get("WorkingCalendar"),
             "LineManagerId": entry.get("LineManagerId"),
             "HierarchyNodeId": entry.get("HierarchyNodeId"),
@@ -1737,8 +1722,8 @@ def cascade_rejig_jobs(cascade_current_jobs):
             "CostCentre": entry.get("CostCentre") if entry.get("CostCentre") != "" else None,
             "JobFamily": entry.get("JobFamily"),
             "ApprenticeUnder25": entry.get("ApprenticeUnder25"),
-            "ApprenticeshipEndDate": convert_datetime_to_date(entry["ApprenticeshipEndDate"]) if entry["ApprenticeshipEndDate"] is not None else None,
-            "ContractEndDate": convert_datetime_to_date(entry["ContractEndDate"]) if entry["ContractEndDate"] is not None else None,
+            "ApprenticeshipEndDate": convertDatetimeToDate(entry["ApprenticeshipEndDate"]) if entry["ApprenticeshipEndDate"] is not None else None,
+            "ContractEndDate": convertDatetimeToDate(entry["ContractEndDate"]) if entry["ContractEndDate"] is not None else None,
             "NormalHours": entry.get("NormalHours"),
             "RealTimeInformationIrregularFrequency": entry.get("RealTimeInformationIrregularFrequency") if entry.get("RealTimeInformationIrregularFrequency") !="" else None,
             "NoticePeriod": entry.get("NoticePeriod"),
@@ -1763,11 +1748,11 @@ def cascade_rejig_jobs(cascade_current_jobs):
     filtered_records = list(most_recent_records.values())
 
     if Data_export:
-        export_data("004 - Jobs to Cascade","002 - Cascade_reordered.json", filtered_records)    
+        exportData("004 - Jobs to Cascade","002 - Cascade_reordered.json", filtered_records)    
 
     return filtered_records
 
-def adp_rejig(cascade_current,adp_responses,ID_library):
+def adpRejig(cascade_current,adp_responses,ID_library):
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Faffling about with the Jobs info to upload to Cascade (" + time_now + ")")
 
@@ -1776,7 +1761,7 @@ def adp_rejig(cascade_current,adp_responses,ID_library):
     new_start_jobs = []
 
     for worker in adp_responses:
-        active_job_position = find_active_job_position(worker)
+        active_job_position = findActiveJobPosition(worker)
     
         jobTitle = worker["workAssignments"][active_job_position].get("jobTitle")
         paybasis_hourly = worker.get("workAssignments", [{}])[active_job_position].get("baseRemuneration", {}).get("hourlyRateAmount", {}).get("nameCode", {}).get("shortName", None)
@@ -1788,17 +1773,16 @@ def adp_rejig(cascade_current,adp_responses,ID_library):
         ADP_id = worker["workAssignments"][active_job_position]["positionID"]
         LM_AOID = worker['workAssignments'][active_job_position].get('reportsTo',[{}])[0].get("associateOID",None)
 
-        contract                    = find_contract(c,worker,active_job_position)
-        employee_id,hierarchy_id    = search_ID_lib(ID_library,ADP_id)
+        contract                    = findContract(c,worker,active_job_position)
+        employee_id,hierarchy_id    = searchIdLibrary(ID_library,ADP_id)
         try:
-            line_manager                = find_line_manager(ID_library,LM_AOID,employee_id)
+            line_manager                = findLineManager(ID_library,LM_AOID,employee_id)
         except Exception:
             print (ADP_id)
             print (LM_AOID)
-            input ("...")
-        paybasis                    = choose_paybasis(paybasis_hourly)
-        salary,salary_rounded       = round_salary(pay_hourly,pay_annual)     
-        contract                    = change_contract_language(contract)
+        paybasis                    = choosePaybasis(paybasis_hourly)
+        salary,salary_rounded       = roundSalary(pay_hourly,pay_annual)     
+        contract                    = changeContractLanguage(contract)
 
         for record in cascade_current:
             if record.get("EmployeeId") == employee_id:
@@ -1810,8 +1794,8 @@ def adp_rejig(cascade_current,adp_responses,ID_library):
                 classification = record.get("Classification")
 
                 effective_date_other = worker.get("workAssignments", [{}])[active_job_position].get("assignmentStatus", {}).get("effectiveDate")
-                startDate = find_start_date(effective_date_wage,cascadeStart,effective_date_other)
-                changeReason = find_change_reason(record,salary,hierarchy_id,line_manager,startDate)
+                startDate = findStartDate(effective_date_wage,cascadeStart,effective_date_other)
+                changeReason = findChangeReason(record,salary,hierarchy_id,line_manager,startDate)
 
                 transformed_record = {
                     "JobTitle": jobTitle,
@@ -1851,16 +1835,16 @@ def adp_rejig(cascade_current,adp_responses,ID_library):
                 transformed_records.append(transformed_record)
                 records_to_add.append(record_to_add)
 
-    new_start_jobs = find_new_starters(records_to_add,ID_library)
+    new_start_jobs = findNewStarters(records_to_add,ID_library)
 
     if Data_export:
-        export_data("004 - Jobs to Cascade","003a - ADP_reordered (Staff with roles).json", transformed_records)    
-        export_data("004 - Jobs to Cascade","003b - ADP_reordered (Staff with roles - Id).json", records_to_add)   #This gives the IDs for above 
-        export_data("004 - Jobs to Cascade","003c - ADP_reordered (New Starters).json",new_start_jobs)
+        exportData("004 - Jobs to Cascade","003a - ADP_reordered (Staff with roles).json", transformed_records)    
+        exportData("004 - Jobs to Cascade","003b - ADP_reordered (Staff with roles - Id).json", records_to_add)   #This gives the IDs for above 
+        exportData("004 - Jobs to Cascade","003c - ADP_reordered (New Starters).json",new_start_jobs)
                 
     return transformed_records,new_start_jobs   
 
-def adp_rejig_new_starters(new_starters,adp_responses,ID_library):
+def adpRejigNewStarters(new_starters,adp_responses,ID_library):
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Faffling about with the New Staff Jobs info to upload to Cascade (" + time_now + ")")
     new_start = []
@@ -1872,11 +1856,11 @@ def adp_rejig_new_starters(new_starters,adp_responses,ID_library):
         if response["associateOID"] in new_starter_values:
             new_start.append(response)
     if Data_export:
-        export_data("004 - Jobs to Cascade","004d - New Starter Jobs (ADP data).json", new_start)    
+        exportData("004 - Jobs to Cascade","004d - New Starter Jobs (ADP data).json", new_start)    
 
 
     for worker in new_start:
-        active_job_position = find_active_job_position(worker)
+        active_job_position = findActiveJobPosition(worker)
        
         jobTitle = worker["workAssignments"][active_job_position].get("jobTitle")
         paybasis_hourly = worker.get("workAssignments", [{}])[active_job_position].get("baseRemuneration", {}).get("hourlyRateAmount", {}).get("nameCode", {}).get("shortName", None)
@@ -1887,12 +1871,12 @@ def adp_rejig_new_starters(new_starters,adp_responses,ID_library):
         ADP_id = worker["workAssignments"][active_job_position]["positionID"]
         LM_AOID = worker['workAssignments'][active_job_position].get('reportsTo',[{}])[0].get("associateOID",None)
 
-        contract                    = find_contract(c,worker,active_job_position)
-        employee_id,hierarchy_id    = search_ID_lib(ID_library,ADP_id)
-        line_manager                = find_line_manager(ID_library,LM_AOID,employee_id)
-        paybasis                    = choose_paybasis(paybasis_hourly)
-        salary,salary_rounded       = round_salary(pay_hourly,pay_annual)     
-        contract                    = change_contract_language(contract)
+        contract                    = findContract(c,worker,active_job_position)
+        employee_id,hierarchy_id    = searchIdLibrary(ID_library,ADP_id)
+        line_manager                = findLineManager(ID_library,LM_AOID,employee_id)
+        paybasis                    = choosePaybasis(paybasis_hourly)
+        salary,salary_rounded       = roundSalary(pay_hourly,pay_annual)     
+        contract                    = changeContractLanguage(contract)
 
         transformed_record = {
             "JobTitle": jobTitle,
@@ -1927,11 +1911,11 @@ def adp_rejig_new_starters(new_starters,adp_responses,ID_library):
         transformed_records.append(transformed_record)
 
     if Data_export:
-        export_data("004 - Jobs to Cascade","004d - New Starter Jobs.json", transformed_records)    
+        exportData("004 - Jobs to Cascade","004d - New Starter Jobs.json", transformed_records)    
 
     return transformed_records
                         
-def classify_adp_files(new_start_jobs,adp_current,cascade_current):
+def classifyAdpFiles(new_start_jobs,adp_current,cascade_current):
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Classify current staff jobs as new line or updated record (" + time_now + ")")
     not_to_be_updated = []
@@ -1970,13 +1954,13 @@ def classify_adp_files(new_start_jobs,adp_current,cascade_current):
     print ()
 
     if Data_export:
-        export_data("004 - Jobs to Cascade","005a - No update needed.json", not_to_be_updated)    
-        export_data("004 - Jobs to Cascade","005b - update current jobs.json", PUT_jobs)    
-        export_data("004 - Jobs to Cascade","005c - add job line.json", POST_jobs)    
+        exportData("004 - Jobs to Cascade","005a - No update needed.json", not_to_be_updated)    
+        exportData("004 - Jobs to Cascade","005b - update current jobs.json", PUT_jobs)    
+        exportData("004 - Jobs to Cascade","005c - add job line.json", POST_jobs)    
 
     return PUT_jobs, POST_jobs
 
-def PUT_update_job_change(PUT_jobs):
+def PutUpdateJobChange(PUT_jobs):
     
     print ("            Updating records that are already present")
     for record in PUT_jobs:
@@ -2013,7 +1997,7 @@ def PUT_update_job_change(PUT_jobs):
         Id = record["Id"]
         employeeId = record["EmployeeId"]
 
-        full_name = find_name(employeeId)
+        full_name = findName(employeeId)
 
         api_base = 'https://api.iris.co.uk/hr/v2/jobs/'
         api_url = api_base + Id      
@@ -2032,7 +2016,7 @@ def PUT_update_job_change(PUT_jobs):
             print("        "+f'Data Transfer for {full_name} has failed. Response Code: {response.status_code}')           
         time.sleep(0.6)
 
-def POST_create_jobs(POST_jobs, new_start_jobs):
+def PostCreateJobs(POST_jobs, new_start_jobs):
                 
         print ("            Adding new job lines")
         combined_list = POST_jobs + new_start_jobs
@@ -2069,7 +2053,7 @@ def POST_create_jobs(POST_jobs, new_start_jobs):
             }
             employeeId = record["EmployeeId"]
 
-            full_name = find_name(employeeId)
+            full_name = findName(employeeId)
 
             api_url = 'https://api.iris.co.uk/hr/v2/jobs'
 
@@ -2093,23 +2077,23 @@ def run_type_4():
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("    Updating Job details on Cascade (" + time_now + ")")
     
-    cascade_jobs                        = cascade_current_jobs()
-    cascade_current                     = cascade_rejig_jobs(cascade_jobs)
-    adp_current,new_starters_jobs       = adp_rejig(cascade_current,adp_responses,ID_library)
-    new_start_jobs                      = adp_rejig_new_starters(new_starters_jobs,adp_responses,ID_library)
-    PUT_jobs, POST_jobs                 = classify_adp_files(new_start_jobs,adp_current,cascade_current)
-    PUT_update_job_change(PUT_jobs)
-    POST_create_jobs(POST_jobs, new_start_jobs)
+    cascade_jobs                        = cascadeCurrentJobs()
+    cascade_current                     = cascadeRejigJobs(cascade_jobs)
+    adp_current,new_starters_jobs       = adpRejig(cascade_current,adp_responses,ID_library)
+    new_start_jobs                      = adpRejigNewStarters(new_starters_jobs,adp_responses,ID_library)
+    PUT_jobs, POST_jobs                 = classifyAdpFiles(new_start_jobs,adp_current,cascade_current)
+    PutUpdateJobChange(PUT_jobs)
+    PostCreateJobs(POST_jobs, new_start_jobs)
 
 # Main Function
 
 if __name__ == "__main__":
 
     if testing is False:
-        delete_folders()                                #clears out at the start of every run. Can be recreated if needed
+        deleteFolders()                                #clears out at the start of every run. Can be recreated if needed
 
-    extended_update,Data_export = debug_check(debug)
-    creds, project_Id = google_auth()
+    extended_update,Data_export = debugCheck(debug)
+    creds, project_Id = googleAuth()
 
     x_months_ago = datetime.now() - timedelta(days=180)
     storage_client = storage.Client(credentials=creds,project=project_Id)
@@ -2121,11 +2105,11 @@ if __name__ == "__main__":
         global access_token, cascade_token, certfile, keyfile, strings_to_exclude, extended_update
         global Data_export, data_store,country_hierarchy_USA, country_hierarchy_CAN
         
-        data_store = data_store_location(c)
-        client_id, client_secret, strings_to_exclude, country_hierarchy_USA, country_hierarchy_CAN, cascade_API_id, keyfile, certfile = load_keys(c)
-        certfile, keyfile = load_ssl(certfile, keyfile)
-        access_token = adp_bearer(client_id,client_secret,certfile,keyfile)
-        cascade_token = cascade_bearer (cascade_API_id)
+        data_store = dataStoreLocation(c)
+        client_id, client_secret, strings_to_exclude, country_hierarchy_USA, country_hierarchy_CAN, cascade_API_id, keyfile, certfile = loadKeys(c)
+        certfile, keyfile = loadSsl(certfile, keyfile)
+        access_token = adpBearer(client_id,client_secret,certfile,keyfile)
+        cascade_token = cascadeBearer (cascade_API_id)
        
         #----------     Global Data Calls     ----------#
         time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -2140,28 +2124,25 @@ if __name__ == "__main__":
             load("002 - Security and Global","002 - Hierarchy Nodes.json","hierarchy_nodes")
 
         else:
-            adp_responses, adp_leave, adp_terminated   = GET_workers_adp()
-            cascade_responses                          = GET_workers_cascade()
-            hierarchy_nodes                            = GET_hierarchy_list(c)
+            adp_responses, adp_leave, adp_terminated   = getWorkersAdp()
+            cascade_responses                          = getWorkersCascade()
+            hierarchy_nodes                            = getHierarchyList(c)
 
-        ID_library                                     = ID_generator(c,adp_responses)
+        ID_library                                     = IDGenerator(c,adp_responses)
 
         if run_type == 1:
-            run_type_1()
+            runType1()
         elif run_type == 2:
-            run_type_2(ID_library)
+            runType2(ID_library)
         elif run_type == 3:
-            run_type_3()
+            runType3()
         elif run_type == 4:
             run_type_4()
-
-
-
 
     countries = ["usa","can"]
     #countries = ["can"]           #Use to test Country independently)
 
-    run_type = find_run_type()
+    run_type = findRunType()
     print (f"Run type {run_type}")
 
     for c in countries:
