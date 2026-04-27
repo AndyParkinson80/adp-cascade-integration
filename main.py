@@ -29,12 +29,12 @@ from collections import defaultdict
 from google.auth import default
 from google.auth.exceptions import DefaultCredentialsError
 from google.oauth2 import service_account
-from google.cloud import secretmanager
+from google.cloud import secretmanager, bigquery
 from google.cloud import storage
 import gspread
 
 debug = False
-test_time = dt_time(3,30,0)     #Use this with base_time_ranges to trigger a given type of update
+test_time = dt_time(4,0,0)     #Use this with base_time_ranges to trigger a given type of update
 
 testing = False
 
@@ -52,7 +52,8 @@ adp_events_url                  = 'https://api.adp.com/core/v1/event-notificatio
 # Set up
 
 def findRunType():
-    
+    overnight = False
+
     now_uk = datetime.now(ZoneInfo("Europe/London"))
     is_bst = bool(now_uk.dst())
 
@@ -93,10 +94,11 @@ def findRunType():
     for start_time, end_time, run_type in time_ranges:
         #print (f"{start_time} : {current_time} : {end_time}")
         if start_time <= current_time < end_time:
-            return run_type
+            overnight = True
+            return run_type,overnight
     
     # Default run type if no time range matches
-    return 1
+    return 2, overnight
 
 def createFolders(current_folder, structure=None, created_paths=None):
     if created_paths is None:
@@ -692,18 +694,75 @@ def findCascadeHierarchylist(nodes):
 
     uploadToGsheets(f"Hierarchy ({c})", "E:G", "E1", results)
 
+def export_to_bq(credentials, project_id: str, data: list[dict],country) -> None:
+    client = bigquery.Client(project=project_id, credentials=credentials)
+
+    full_table_ref = f"{project_id}.library.library_{country}"
+
+    client.query(f"TRUNCATE TABLE `{full_table_ref}`").result()
+    print(f"Table '{full_table_ref}' truncated.")
+
+    def normalise_row(row: dict) -> dict:
+        return {
+            "AOID":             row.get("AOID"),
+            "CascadeId":        row.get("CascadeId"),
+            "Cascade_full":     row.get("Cascade_full"),
+            "ADP_number":       row.get("ADP_number"),
+            "ADP_line_manager": row.get("ADP_line_manager"),
+            "Job_position":     row.get("Job_position"),
+            "Job_Code":         row.get("Job Code"),       # space → underscore
+            "Job_Name":         row.get("Job Name"),       # space → underscore
+            "Hierarchy":        row.get("Hierarchy"),
+            "Cascade_Start":    row.get("Cascade Start"),  # space → underscore
+            "ADP_Start":        row.get("ADP Start"),      # space → underscore
+            "contServiceDate":  row.get("contServiceDate"),
+        }
+
+    rows = [normalise_row(r) for r in data]
+
+    errors = client.insert_rows_json(full_table_ref, rows)
+
+    if errors:
+        raise RuntimeError(f"BigQuery insert errors: {errors}")
+
+    print(f"Successfully loaded {len(rows)} rows into '{full_table_ref}'.")
+
+def import_from_bq(credentials, project_id: str, country: str) -> list[dict]:
+    client = bigquery.Client(project=project_id, credentials=credentials)
+
+    full_table_ref = f"{project_id}.library.library_{country}"
+
+    rows = client.query(f"SELECT * FROM `{full_table_ref}`").result()
+
+    def denormalise_row(row: dict) -> dict:
+        return {
+            "AOID":             row.get("AOID"),
+            "CascadeId":        row.get("CascadeId"),
+            "Cascade_full":     row.get("Cascade_full"),
+            "ADP_number":       row.get("ADP_number"),
+            "ADP_line_manager": row.get("ADP_line_manager"),
+            "Job_position":     row.get("Job_position"),
+            "Job Code":         row.get("Job_Code"),        # underscore → space
+            "Job Name":         row.get("Job_Name"),        # underscore → space
+            "Hierarchy":        row.get("Hierarchy"),
+            "Cascade Start":    row.get("Cascade_Start"),   # underscore → space
+            "ADP Start":        row.get("ADP_Start"),       # underscore → space
+            "contServiceDate":  row.get("contServiceDate"),
+        }
+
+    data = [denormalise_row(dict(row)) for row in rows]
+
+    print(f"Successfully loaded {len(data)} rows from '{full_table_ref}'.")
+    
+    exportData("002 - Security and Global","003 - ID_library.json", data)
+
+    return data
+
 def IDGenerator(country,adp_responses):
 
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("    Creating an ID library (" + time_now + ")")
-
-    '''xlsx_in_memory = loadXlsxFromBucket("Hierarchy")
-    df = pd.read_excel(xlsx_in_memory, sheet_name=f"{country} Conversion")
-    df = df.replace({np.nan: None})
-    df['adp_code'] = df['adp_code'].astype(str)
-    df['cascade_code'] = pd.to_numeric(df['cascade_code'], errors='coerce')
-    hierarchy_library = df.to_dict(orient='records')'''
-    
+   
     hierarchy_library = downloadFromGsheets(f"Hierarchy ({c})","K:O")
     ID_library = []
 
@@ -771,6 +830,8 @@ def IDGenerator(country,adp_responses):
         ID_library.append(transformed_record)
 
     exportData("002 - Security and Global","003 - ID_library.json", ID_library)
+
+    export_to_bq(creds,project_Id,ID_library,c)
     
     return ID_library
 
@@ -1308,7 +1369,8 @@ def runType2(ID_library):
     filtered_id_library = ID_library
 
     #if c =="usa" and 
-    if datetime.today().weekday() < 5:        
+    #if datetime.today().weekday() < 5:        
+    if overnight is False:
         print (len(ID_library))
         filter = FindEventAoid()
         associate_oid_list = list(set(filter))
@@ -2318,9 +2380,10 @@ if __name__ == "__main__":
     x_months_ago = datetime.now() - timedelta(days=180)
     storage_client = storage.Client(credentials=creds,project=project_Id)
 
-    def country_choice(c,run_type):
+    def country_choice(c,run_type,overnight):
         print ("---------------------------------------------------------------------------------------------------------------")
         print (f"Synchronizing country: {c}")                                           #c represents country. Either USA or CAN
+        print (f"Overnight is {overnight}")
 
         global access_token, cascade_token, certfile, keyfile, strings_to_exclude, extended_update
         global Data_export, data_store,country_hierarchy_USA, country_hierarchy_CAN
@@ -2331,33 +2394,37 @@ if __name__ == "__main__":
         access_token = adpBearer(client_id,client_secret,certfile,keyfile)
         cascade_token = cascadeBearer (cascade_API_id)
        
-        #----------     Global Data Calls     ----------#
-        time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print ("    Making global calls (" + time_now + ")")
+        if overnight:
+            #----------     Global Data Calls     ----------#
+            time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print ("    Making global calls (" + time_now + ")")
 
-        global adp_responses,adp_terminated,cascade_responses,hierarchy_nodes,ID_library                              
+            global adp_responses,adp_terminated,cascade_responses,hierarchy_nodes,ID_library                              
 
-        if testing:
-            load("002 - Security and Global","001 - ADP (Data Out - active).json","adp_responses")
-            load("002 - Security and Global","001 - ADP (Data Out - terminated).json","adp_terminated")
-            load("002 - Security and Global","001 - Cascade Raw Out.json","cascade_responses")
-            load("002 - Security and Global","002 - Hierarchy Nodes.json","hierarchy_nodes")
+            if testing:
+                load("002 - Security and Global","001 - ADP (Data Out - active).json","adp_responses")
+                load("002 - Security and Global","001 - ADP (Data Out - terminated).json","adp_terminated")
+                load("002 - Security and Global","001 - Cascade Raw Out.json","cascade_responses")
+                load("002 - Security and Global","002 - Hierarchy Nodes.json","hierarchy_nodes")
 
+            else:
+                adp_responses, adp_leave, adp_terminated    = getWorkersAdp()
+                cascade_responses                           = getWorkersCascade()
+                hierarchy_nodes                             = getHierarchyList(c)
+
+            adpJobCodes                                     = findJobNamesAndCodes(c, adp_responses)
+            findUniqueJobsADP(adpJobCodes)
+            findCascadeHierarchylist(hierarchy_nodes)
+            absence_reasons_raw                             = cascadeAbsenceReasons()
+            
+            prefixes = ["US", "USA", "Hol"] if c == "usa" else ["CAN","Hol"]        
+            print (prefixes)
+            findAbsenceHierarchy(absence_reasons_raw,prefixes)
+            
+            ID_library                                      = IDGenerator(c,adp_responses)
         else:
-            adp_responses, adp_leave, adp_terminated    = getWorkersAdp()
-            cascade_responses                           = getWorkersCascade()
-            hierarchy_nodes                             = getHierarchyList(c)
-
-        adpJobCodes                                     = findJobNamesAndCodes(c, adp_responses)
-        findUniqueJobsADP(adpJobCodes)
-        findCascadeHierarchylist(hierarchy_nodes)
-        absence_reasons_raw                             = cascadeAbsenceReasons()
-        
-        prefixes = ["US", "USA", "Hol"] if c == "usa" else ["CAN","Hol"]        
-        print (prefixes)
-        findAbsenceHierarchy(absence_reasons_raw,prefixes)
-        
-        ID_library                                      = IDGenerator(c,adp_responses)
+            ID_library                                      = import_from_bq(creds,project_Id,c)
+            print ("ID library downloaded")
 
         if run_type == 1:
             runType1()
@@ -2371,12 +2438,12 @@ if __name__ == "__main__":
     countries = ["usa","can"]
     #countries = ["can"]           #Use to test Country independently)
 
-    run_type = findRunType()
-    print (f"Run type {run_type}")
+    run_type,overnight = findRunType()
+    print (f"Run type {run_type} - Overnight is {overnight}")
 
 
     for c in countries:
-        country_choice (c,run_type)
+        country_choice (c,run_type,overnight)
 
     ct_fin = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ()
