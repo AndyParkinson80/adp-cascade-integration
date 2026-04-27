@@ -21,8 +21,9 @@ import shutil
 
 # Third-party - Data Processing
 import pandas as pd
-import numpy as np
 import requests
+from collections import defaultdict
+
 
 # Google Cloud Platform
 from google.auth import default
@@ -30,21 +31,23 @@ from google.auth.exceptions import DefaultCredentialsError
 from google.oauth2 import service_account
 from google.cloud import secretmanager
 from google.cloud import storage
+import gspread
 
 debug = False
-test_time = dt_time(4,0,0)     #Testing the triggering from gcs
+test_time = dt_time(3,30,0)     #Use this with base_time_ranges to trigger a given type of update
 
 testing = False
 
 current_folder = Path(__file__).resolve().parent
 
-adp_workers             = 'https://api.adp.com/hr/v2/workers'
-cascade_workers         = 'https://api.iris.co.uk/hr/v2/employees?%24count=true'
-cascade_workers_base    = 'https://api.iris.co.uk/hr/v2/employees'
-cascade_jobs_url        = 'https://api.iris.co.uk/hr/v2/jobs?%24count=true'
-cascade_absences_url    = 'https://api.iris.co.uk/hr/v2/attendance/absences'        
-cascade_absencedays     = 'https://api.iris.co.uk/hr/v2/attendance/absencedays'
-adp_events_url         = 'https://api.adp.com/core/v1/event-notification-messages'
+adp_workers                     = 'https://api.adp.com/hr/v2/workers'
+cascade_workers                 = 'https://api.iris.co.uk/hr/v2/employees?%24count=true'
+cascade_workers_base            = 'https://api.iris.co.uk/hr/v2/employees'
+cascade_jobs_url                = 'https://api.iris.co.uk/hr/v2/jobs?%24count=true'
+cascade_absences_url            = 'https://api.iris.co.uk/hr/v2/attendance/absences'        
+cascade_absencedays             = 'https://api.iris.co.uk/hr/v2/attendance/absencedays'
+cascade_absence_reasons_url     = 'https://api.iris.co.uk/hr/v2/attendance/absencereasons?%24count=true'
+adp_events_url                  = 'https://api.adp.com/core/v1/event-notification-messages'
 
 # Set up
 
@@ -56,18 +59,22 @@ def findRunType():
     print("Current UK time:", now_uk)
     print("BST active?", is_bst)
     
+    
     # Get the current UK time (not system time)
     if debug is True:
         current_time = test_time
+        print (f"Testing Time: {current_time}")
+
     else:
         current_time = now_uk.time()
+        print (f"Trigger Time: {current_time}")
+
     
     # Adjust time ranges based on BST (add 1 hour during summer)
-    hour_offset = 1 if is_bst else 0
+    hour_offset = 1 if (is_bst and not debug) else 0    
     
     # Base times (these are the winter times)
     base_time_ranges = [
-        (dt_time(22, 46), dt_time(23, 15), 1),       # Push New Cascade Id's back to ADP (23:00)
         (dt_time(0, 46), dt_time(1, 15), 3),        # Updates staff personal and adds new staff (01:00)
         (dt_time(2, 45), dt_time(3, 15), 1),        # Push New Cascade Id's back to ADP (Pushes ID for new Staff) (03:00)
         (dt_time(3, 16), dt_time(3, 45), 4),        # Updates job details (03:30)
@@ -84,6 +91,7 @@ def findRunType():
         
     # Find matching time range
     for start_time, end_time, run_type in time_ranges:
+        #print (f"{start_time} : {current_time} : {end_time}")
         if start_time <= current_time < end_time:
             return run_type
     
@@ -179,7 +187,7 @@ def load(folder,filename,variable_name):
     file_path = Path(data_store) / folder / filename
     with open(file_path,"r") as file:
         globals()[variable_name] = json.load(file)
-
+    
 def googleAuth():
     try:
         # 1. Try Application Default Credentials (Cloud Run)
@@ -572,31 +580,131 @@ def findHierarchyId(job_code,job_name,hierarchy_library):
 
     # First pass: try exact match (code + name) 
     for item in hierarchy_library: 
-        if str(item["adp_code"]) == str(job_code) and str(item["adp_name"]) == str(job_name): 
-            hierarchy = str(item["hierarchy"])
+        if str(item["Job Code"]) == str(job_code) and str(item["Job Name"]) == str(job_name): 
+            hierarchy = str(item["CascadeId"])
             break 
-        
-        # Second pass: if no exact match, try fallback (code + name is None) 
-        if hierarchy is None: 
-            for item in hierarchy_library: 
-                if str(item["adp_code"]) == str(job_code) and item["adp_name"] is None: 
-                    hierarchy = str(item["hierarchy"])
-                    break 
-           
+                   
     return hierarchy
+
+def findJobNamesAndCodes(country, adp_responses):
+    job_records = []
+
+    for worker in adp_responses:
+        active_job_position = findActiveJobPosition(worker)
+        job_code = None
+        job_name = None
+        try:
+            job_name = worker["workAssignments"][active_job_position]["jobCode"].get("codeValue", "")
+        except KeyError:
+            job_name = None
+        
+        try:
+            if country == "usa":
+                try:
+                    job_code = worker["workAssignments"][active_job_position]["homeOrganizationalUnits"][1]["nameCode"]["codeValue"]
+                except (KeyError, IndexError):
+                    job_code = worker["workAssignments"][active_job_position]["homeOrganizationalUnits"][0]["nameCode"]["codeValue"]
+
+            elif country == "can":
+                job_code = worker["workAssignments"][active_job_position]["homeOrganizationalUnits"][0]["nameCode"]["codeValue"]
+        except (KeyError, IndexError):
+            job_code = None
+
+        if job_code is not None:
+            job_records.append((job_code, job_name))
+
+    unique_job_records = list(dict.fromkeys(job_records))
+
+    return unique_job_records
+
+def uploadToGsheets(sheet_name,range,start,data):
+    spreadsheet_id = getSecret("hierarchy_gsheet_id")
+
+    SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+            ]
+    
+    scoped_creds = creds.with_scopes(SCOPES)    
+    gc = gspread.authorize(scoped_creds)
+    
+    sh = gc.open_by_key(spreadsheet_id)
+    
+    worksheet = sh.worksheet(sheet_name)
+    worksheet.batch_clear([range])
+    worksheet.update(range_name=start, values=data)
+
+def downloadFromGsheets(sheet_name, range):
+    spreadsheet_id = getSecret("hierarchy_gsheet_id")
+
+    SCOPES = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+
+    scoped_creds = creds.with_scopes(SCOPES)
+    gc = gspread.authorize(scoped_creds)
+
+    sh = gc.open_by_key(spreadsheet_id)
+
+    worksheet = sh.worksheet(sheet_name)
+    data = worksheet.get(range)
+
+    if not data or len(data) < 2:
+        return []
+
+    headers = data[0]
+    return [dict(zip(headers, row)) for row in data[1:]]
+
+def findUniqueJobsADP(unique_jobs):
+    unique_jobs.sort(key=lambda x: (x[0], x[1]))
+    rows = [["Job Code", "Job Name"]] + [list(row) for row in unique_jobs]
+
+    uploadToGsheets(f"Hierarchy ({c})","A:B","A1",rows)
+
+def findCascadeHierarchylist(nodes):
+    children_map = defaultdict(list)
+
+    for node in nodes:
+        children_map[node["ParentId"]].append(node)
+
+    country = "USA" if c == "usa" else "Canada"
+    
+    start_node = next(
+        x for x in nodes if country in x["Title"] and x["Level"] == 2
+    )
+
+    def build_paths(node, path, results):
+        path = path + [node["Title"]]
+
+        # Append every node, not just leaves
+        results.append([
+            " -> ".join(path),
+            node["SourceSystemId"],
+            node["Id"]
+        ])
+
+        for child in children_map[node["Id"]]:
+            build_paths(child, path, results)
+
+    results = [["Hierarchy Path", "SourceSystemId", "Id"]]  # Header row
+    build_paths(start_node, [], results)
+
+    uploadToGsheets(f"Hierarchy ({c})", "E:G", "E1", results)
 
 def IDGenerator(country,adp_responses):
 
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("    Creating an ID library (" + time_now + ")")
 
-    xlsx_in_memory = loadXlsxFromBucket("Hierarchy")
+    '''xlsx_in_memory = loadXlsxFromBucket("Hierarchy")
     df = pd.read_excel(xlsx_in_memory, sheet_name=f"{country} Conversion")
     df = df.replace({np.nan: None})
     df['adp_code'] = df['adp_code'].astype(str)
     df['cascade_code'] = pd.to_numeric(df['cascade_code'], errors='coerce')
-    hierarchy_library = df.to_dict(orient='records')
+    hierarchy_library = df.to_dict(orient='records')'''
     
+    hierarchy_library = downloadFromGsheets(f"Hierarchy ({c})","K:O")
     ID_library = []
 
     exportData("002 - Security and Global",f"002 - {country} Hierarchy.json", hierarchy_library)    
@@ -615,15 +723,23 @@ def IDGenerator(country,adp_responses):
         job_name = None
         CascadeID = None
 
-        job_name = worker["workAssignments"][active_job_position]["jobCode"].get("codeValue","")
+        try:
+            job_name = worker["workAssignments"][active_job_position]["jobCode"].get("codeValue", "")
+        except KeyError:
+            job_name = None
+        
+        try:
+            if country == "usa":
+                try:
+                    job_code = worker["workAssignments"][active_job_position]["homeOrganizationalUnits"][1]["nameCode"]["codeValue"]
+                except (KeyError, IndexError):
+                    job_code = worker["workAssignments"][active_job_position]["homeOrganizationalUnits"][0]["nameCode"]["codeValue"]
 
+            elif country == "can":
+                job_code = worker["workAssignments"][active_job_position]["homeOrganizationalUnits"][0]["nameCode"]["codeValue"]
+        except (KeyError, IndexError):
+            job_code = None
 
-        if country == "usa":
-            job_code = worker["workAssignments"][active_job_position]["homeOrganizationalUnits"][1]["nameCode"]["codeValue"]
-
-        elif country == "can":
-            job_code = worker["workAssignments"][active_job_position]["homeOrganizationalUnits"][0]["nameCode"]["codeValue"]
-            #job_name = worker["workAssignments"][active_job_position]["jobCode"]["codeValue"]
 
         CascadeID, Cascade_full, contServiceCascade = findCascadeIdAndContService(ADP_identifier)
 
@@ -649,13 +765,76 @@ def IDGenerator(country,adp_responses):
             "ADP Start": formatted_date,
             "contServiceDate": date,
         }
+
+        
         
         ID_library.append(transformed_record)
 
     exportData("002 - Security and Global","003 - ID_library.json", ID_library)
     
     return ID_library
-    
+
+def cascadeAbsenceReasons():
+    time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print ("    Retrieving Absence Reasons Data from Cascade HR (" + time_now + ")")
+    global cascade_absence_reasons
+
+    cascade_absence_reasons = []
+
+    page_size = 200
+
+    api_response = apiCallCascade(cascade_token,cascade_absence_reasons_url,None)
+
+    api_calls = apiCountCascade(api_response,page_size)                
+
+    for i in range(api_calls):
+            skip_param = i * page_size
+            api_params = {
+                "$top": page_size,
+                "$skip": skip_param
+            } 
+            
+            api_response = apiCallCascade(cascade_token,cascade_absence_reasons_url,api_params)
+
+            if api_response.status_code == 200:
+                json_data = api_response.json()
+                json_data = json_data['value']
+                cascade_absence_reasons.extend(json_data)    
+
+
+    exportData("002 - Security and Global", "001 - Cascade Absences Raw.json", cascade_absence_reasons)    
+
+    return cascade_absence_reasons 
+
+def findAbsenceHierarchy(nodes, prefixes):
+    children_map = defaultdict(list)
+
+    for node in nodes:
+        children_map[node["ParentId"]].append(node)
+
+    root_nodes = children_map[None]
+
+    def build_paths(node, path, results):
+        path = path + [node["Name"]]
+
+        if len(path) == 2 and any(path[0].startswith(p) for p in prefixes):
+            results.append([
+                " -> ".join(path),
+                node["SourceSystemId"],
+                node["Id"]
+            ])
+
+        for child in children_map[node["Id"]]:
+            build_paths(child, path, results)
+
+    results = [["Hierarchy Path", "SourceSystemId", "Id"]]
+    for root in root_nodes:
+        build_paths(root, [], results)
+
+    uploadToGsheets(f"Absence Hierarchy ({c})", "A:C", "A1", results)
+
+    return results
+
 # Cascade to ADP (run-type-1)
 #---------------------------------------- Support Functions
 def createCascadeidUpdateList(ID_library, cascade, adp):
@@ -851,12 +1030,14 @@ def convertAdpAbsencesToCascadeFormat(adp_response, absence_reasons, Cascade_ful
 
             if c == "usa":
                 absence_earning_type = main["paidTimeOffEntries"][0]["earningType"].get("labelName", "")
+                adp_absence_categories.append(f"{absence_policy} --> {absence_earning_type}")
                 AbsenceReasonId = next(
                     (a["cascadeAbsenceId"] for a in absence_reasons
                      if a["policy"] == absence_policy and a["earningType"] == absence_earning_type),
                     None
                 )
             elif c == "can":
+                adp_absence_categories.append(absence_policy)
                 AbsenceReasonId = next(
                     (a["Id"] for a in absence_reasons if a["Name"] == absence_policy),
                     None
@@ -1116,6 +1297,9 @@ def FindEventAoid():
 #---------------------------------------- Top Level Function               
 def runType2(ID_library):
 
+    global adp_absence_categories
+    adp_absence_categories = []
+
     ninety_days_ago = datetime.now() - timedelta(days=90)                                                   # ADP only returns last 90, this allows the same for cascade
     absences_from = ninety_days_ago.strftime('%Y-%m-%dT%H:%M:%S.000Z')
 
@@ -1123,13 +1307,13 @@ def runType2(ID_library):
 
     filtered_id_library = ID_library
 
-    if c == "usa" and datetime.today().weekday() < 5:        
+    #if c =="usa" and 
+    if datetime.today().weekday() < 5:        
         print (len(ID_library))
         filter = FindEventAoid()
         associate_oid_list = list(set(filter))
         filtered_id_library = [entry for entry in ID_library if entry["AOID"] in associate_oid_list]
         print (len(filtered_id_library))
-
 
     for record in filtered_id_library:
         CascadeId = record["CascadeId"]
@@ -1140,7 +1324,7 @@ def runType2(ID_library):
             adp_response = getAbsencesAdp(AOID)                               #Downloads the absences in the last 90 days for a given staff member
 
             if len(adp_response) == 0:
-                print(f"        No booked absences for {CascadeId}")
+                print(f"        No absences for {CascadeId}")
                 continue  # If there are no absences, skip to the next record                
             else:
                 adp_current = convertAdpAbsencesToCascadeFormat(adp_response,absence_reasons,Cascade_full,AOID,ninety_days_ago)                             # Converts ADP absences into Cascade format
@@ -1149,6 +1333,7 @@ def runType2(ID_library):
 
             DeleteAbsences(delete_ids)  # Deletes cancelled absences
             PostAbsences(new_records,Cascade_full)  # Creates new absences
+
 
         except json.JSONDecodeError as e:
             if str(e) == "Expecting value: line 1 column 1 (char 0)":
@@ -1160,6 +1345,11 @@ def runType2(ID_library):
             error_message = f"      Error processing CascadeId {CascadeId} on line {line_number}: {e}"
             print(error_message)
             continue
+    
+    adp_absence_categories = list(set(adp_absence_categories))                                                                                             #Deduplicates list
+    adp_absence_categories = [[v] for v in dict.fromkeys(adp_absence_categories)]
+    uploadToGsheets(f"Absence Hierarchy ({c})","E:E","E1",adp_absence_categories)
+    exportData("005 - Absences to Cascade", "001 - usa absence reasons from records.json", adp_absence_categories)
 
 # Update Personal Details (Run Type 3)
 #---------------------------------------Support Functions
@@ -1282,7 +1472,10 @@ def convertAdpToCascadeForm(records,suffix,terminations,ID_library,x_months_ago=
         
     for worker in records:
         active_job_position = findActiveJobPosition(worker)
-        gender = worker["person"]["genderCode"].get("shortName",None)
+        try:
+            gender = worker["person"]["genderCode"].get("shortName",None)
+        except:
+            gender = None
         salutation = worker["person"]["legalName"].get("preferredSalutations",[{}])[0].get("salutationCode",{}).get("shortName")
         firstName = worker["person"]["legalName"]["givenName"]
         preffered = worker["person"]['legalName'].get("nickName",None)
@@ -1564,6 +1757,7 @@ def PostNewStarters(new_starters):
         else:
             print("             "+f'Data Transfer for New Starter ({FirstName} {LastName}) has failed. Response Code: {response.status_code}')           
         time.sleep(0.6)  
+
 #---------------------------------------- Top Level Function   
 def runType3():
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1633,11 +1827,14 @@ def choosePaybasis(paybasis_hourly):
     return paybasis
 
 def roundSalary(pay_hourly,pay_annual):
-    if pay_hourly is not None:
-        salary = float(pay_hourly)
-    else:
-        salary = float(pay_annual)
-    
+    try:
+        if pay_hourly is not None:
+            salary = float(pay_hourly)
+        else:
+            salary = float(pay_annual)
+    except TypeError:
+        salary = 0
+
     salary_rounded = round(salary,2)   
     return salary,salary_rounded
 
@@ -1661,12 +1858,15 @@ def findChangeReason(record,salary,hierarchy_id,line_manager,startDate):
     return changeReason
 
 def findStartDate(effective_date_wage,cascadeStart,effective_date_other):
-    wage = datetime.strptime(effective_date_wage, "%Y-%m-%d")
     cascade = datetime.strptime(cascadeStart, "%Y-%m-%d")
-    other = datetime.strptime(effective_date_other, "%Y-%m-%d")
 
-    startDate = max(wage, cascade, other)
-    startDate = startDate.strftime("%Y-%m-%d")
+    try:
+        wage = datetime.strptime(effective_date_wage, "%Y-%m-%d")
+        other = datetime.strptime(effective_date_other, "%Y-%m-%d")
+        startDate = max(wage, cascade, other)
+        startDate = startDate.strftime("%Y-%m-%d")
+    except Exception as e:
+        startDate = cascade.strftime("%Y-%m-%d")
     return startDate
 
 def findNewStarters(records_to_add,ID_library):
@@ -1818,6 +2018,7 @@ def adpRejig(cascade_current,adp_responses,ID_library):
 
                 effective_date_other = worker.get("workAssignments", [{}])[active_job_position].get("assignmentStatus", {}).get("effectiveDate")
                 startDate = findStartDate(effective_date_wage,cascadeStart,effective_date_other)
+
                 changeReason = findChangeReason(record,salary,hierarchy_id,line_manager,startDate)
 
                 transformed_record = {
@@ -2143,11 +2344,20 @@ if __name__ == "__main__":
             load("002 - Security and Global","002 - Hierarchy Nodes.json","hierarchy_nodes")
 
         else:
-            adp_responses, adp_leave, adp_terminated   = getWorkersAdp()
-            cascade_responses                          = getWorkersCascade()
-            hierarchy_nodes                            = getHierarchyList(c)
+            adp_responses, adp_leave, adp_terminated    = getWorkersAdp()
+            cascade_responses                           = getWorkersCascade()
+            hierarchy_nodes                             = getHierarchyList(c)
 
-        ID_library                                     = IDGenerator(c,adp_responses)
+        adpJobCodes                                     = findJobNamesAndCodes(c, adp_responses)
+        findUniqueJobsADP(adpJobCodes)
+        findCascadeHierarchylist(hierarchy_nodes)
+        absence_reasons_raw                             = cascadeAbsenceReasons()
+        
+        prefixes = ["US", "USA", "Hol"] if c == "usa" else ["CAN","Hol"]        
+        print (prefixes)
+        findAbsenceHierarchy(absence_reasons_raw,prefixes)
+        
+        ID_library                                      = IDGenerator(c,adp_responses)
 
         if run_type == 1:
             runType1()
@@ -2159,10 +2369,11 @@ if __name__ == "__main__":
             run_type_4()
 
     countries = ["usa","can"]
-    #countries = ["usa"]           #Use to test Country independently)
+    #countries = ["can"]           #Use to test Country independently)
 
     run_type = findRunType()
     print (f"Run type {run_type}")
+
 
     for c in countries:
         country_choice (c,run_type)
