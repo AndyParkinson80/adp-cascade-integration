@@ -33,8 +33,8 @@ from google.cloud import secretmanager, bigquery
 from google.cloud import storage
 import gspread
 
-debug = False
-test_time = dt_time(4,0,0)     #Use this with base_time_ranges to trigger a given type of update
+debug = True
+test_time = dt_time(3,0,0)     #Use this with base_time_ranges to trigger a given type of update
 
 testing = False
 
@@ -2408,7 +2408,8 @@ if __name__ == "__main__":
                 load("002 - Security and Global","002 - Hierarchy Nodes.json","hierarchy_nodes")
 
             else:
-                adp_responses, adp_leave, adp_terminated    = getWorkersAdp()
+                adp_current, adp_leave, adp_terminated    = getWorkersAdp()
+                adp_responses = adp_current + adp_leave
                 cascade_responses                           = getWorkersCascade()
                 hierarchy_nodes                             = getHierarchyList(c)
 

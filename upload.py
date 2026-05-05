@@ -88,6 +88,7 @@ REPO = "integration"
 IMAGE_NAME = "integration"
 TAG = f"{REGION}-docker.pkg.dev/{PROJECT_ID}/{REPO}/{IMAGE_NAME}:latest"
 JOB_NAME = "adp-integrations"
+JOB_NAME_2 = "event-driven-absences"
 BUCKET_NAME = f"gcf-artifacts-{PROJECT_ID}"  # Must exist
 SOURCE_TAR = "source.tar.gz"
 
@@ -170,9 +171,9 @@ def trigger_cloud_build(credentials, object_name):
     print("✅ Cloud Build started. Build ID:", build_op["metadata"]["build"]["id"])
 
 # Step 6: Update Job (without running)
-def update_job_only(credentials):
+def update_job_only(credentials,job_name):
     run_client = build("run", "v2", credentials=credentials)
-    name = f"projects/{PROJECT_ID}/locations/{REGION}/jobs/{JOB_NAME}"
+    name = f"projects/{PROJECT_ID}/locations/{REGION}/jobs/{job_name}"
     
     try:
         job = run_client.projects().locations().jobs().get(name=name).execute()
@@ -244,9 +245,9 @@ def update_job_only(credentials):
         raise
 
 # Step 7: Update and Run Job
-def update_and_run_job(credentials):
+def update_and_run_job(credentials, job_name):
     run_client = build("run", "v2", credentials=credentials)
-    name = f"projects/{PROJECT_ID}/locations/{REGION}/jobs/{JOB_NAME}"
+    name = f"projects/{PROJECT_ID}/locations/{REGION}/jobs/{job_name}"
     
     try:
         job = run_client.projects().locations().jobs().get(name=name).execute()
@@ -329,21 +330,17 @@ def update_and_run_job(credentials):
 
 if __name__ == "__main__":
     try:
-        # 📦 Create the tarball
         create_tarball()
-
-        # ☁️ Upload and trigger build
         object_name = upload_source(credentials)
         trigger_cloud_build(credentials, object_name)
         
-        # 🚀 Deploy or update Cloud Run job
-        if runGcloud:
-            print("🚀 runGcloud is TRUE - Updating and running Cloud Run job...")
-            update_and_run_job(credentials)
-        else:
-            print("🔧 runGcloud is FALSE - Updating job but not running...")
-            update_job_only(credentials)
-            
+        for job in [JOB_NAME, JOB_NAME_2]:
+            if runGcloud:
+                print(f"🚀 Updating and running job: {job}")
+                update_and_run_job(credentials, job)
+            else:
+                print(f"🔧 Updating job (not running): {job}")
+                update_job_only(credentials, job)
     finally:
         # 🧹 Clean up artifacts
         if os.path.exists(SOURCE_TAR):
