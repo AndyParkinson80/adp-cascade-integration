@@ -34,7 +34,7 @@ from google.cloud import storage
 import gspread
 
 debug = True
-test_time = dt_time(3,0,0)     #Use this with base_time_ranges to trigger a given type of update
+test_time = dt_time(3,30,0)     #Use this with base_time_ranges to trigger a given type of update
 
 testing = False
 
@@ -48,6 +48,13 @@ cascade_absences_url            = 'https://api.iris.co.uk/hr/v2/attendance/absen
 cascade_absencedays             = 'https://api.iris.co.uk/hr/v2/attendance/absencedays'
 cascade_absence_reasons_url     = 'https://api.iris.co.uk/hr/v2/attendance/absencereasons?%24count=true'
 adp_events_url                  = 'https://api.adp.com/core/v1/event-notification-messages'
+
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/cloud-platform"
+]
+
 
 # Set up
 
@@ -191,35 +198,37 @@ def load(folder,filename,variable_name):
         globals()[variable_name] = json.load(file)
     
 def googleAuth():
+    # 1. Local dev — prefer service account file to avoid ADC scope issues
+    file_path = os.getenv("GCP")
+    if file_path and os.path.exists(file_path):
+        credentials = service_account.Credentials.from_service_account_file(
+            file_path, scopes=SCOPES
+        )
+        with open(file_path) as f:
+            project_id = json.load(f).get("project_id")
+        print("✅ Authenticated with service account from file")
+        return credentials, project_id
+
     try:
-        # 1. Try Application Default Credentials (Cloud Run)
-        credentials, project_id = default()
+        # 2. Cloud Run — ADC
+        credentials, project_id = default(scopes=SCOPES)
         print("✅ Authenticated with ADC")
         return credentials, project_id
 
     except DefaultCredentialsError:
-        print("⚠️ ADC not available, trying GOOGLE_CLOUD_SECRET env var...")
-
-        # 2. Codespaces (secret stored in env var)
+        # 3. Codespaces
         secret_json = os.getenv('GOOGLE_CLOUD_SECRET')
         if secret_json:
             service_account_info = json.loads(secret_json)
-            credentials = service_account.Credentials.from_service_account_info(service_account_info)
+            credentials = service_account.Credentials.from_service_account_info(
+                service_account_info, scopes=SCOPES
+            )
             project_id = service_account_info.get('project_id')
             print("✅ Authenticated with service account from env var")
             return credentials, project_id
 
-        # 3. Local dev (service account file path)
-        file_path = os.getenv("GCP")
-        if file_path and os.path.exists(file_path):
-            credentials = service_account.Credentials.from_service_account_file(file_path)
-            with open(file_path) as f:
-                project_id = json.load(f).get("project_id")
-            print("✅ Authenticated with service account from file")
-            return credentials, project_id
-
-        raise Exception("❌ No valid authentication method found")
-
+        raise Exception("❌ No valid authentication method found")    
+    
 def debugCheck(debug):
     if debug:
         if testing is False:
@@ -619,36 +628,16 @@ def findJobNamesAndCodes(country, adp_responses):
 
     return unique_job_records
 
-def uploadToGsheets(sheet_name,range,start,data):
+def uploadToGsheets(sheet_name, range, start, data):
     spreadsheet_id = getSecret("hierarchy_gsheet_id")
-
-    SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-            ]
-    
-    scoped_creds = creds.with_scopes(SCOPES)    
-    gc = gspread.authorize(scoped_creds)
-    
     sh = gc.open_by_key(spreadsheet_id)
-    
     worksheet = sh.worksheet(sheet_name)
     worksheet.batch_clear([range])
     worksheet.update(range_name=start, values=data)
 
 def downloadFromGsheets(sheet_name, range):
     spreadsheet_id = getSecret("hierarchy_gsheet_id")
-
-    SCOPES = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-    ]
-
-    scoped_creds = creds.with_scopes(SCOPES)
-    gc = gspread.authorize(scoped_creds)
-
     sh = gc.open_by_key(spreadsheet_id)
-
     worksheet = sh.worksheet(sheet_name)
     data = worksheet.get(range)
 
@@ -2376,6 +2365,8 @@ if __name__ == "__main__":
 
     extended_update,data_export = debugCheck(debug)
     creds, project_Id = googleAuth()
+    print("Service account / identity:", creds.service_account_email if hasattr(creds, 'service_account_email') else "ADC user")
+    gc = gspread.authorize(creds)
 
     x_months_ago = datetime.now() - timedelta(days=180)
     storage_client = storage.Client(credentials=creds,project=project_Id)
