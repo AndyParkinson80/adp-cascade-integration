@@ -24,7 +24,6 @@ import pandas as pd
 import requests
 from collections import defaultdict
 
-
 # Google Cloud Platform
 from google.auth import default
 from google.auth.exceptions import DefaultCredentialsError
@@ -34,7 +33,7 @@ from google.cloud import storage
 import gspread
 
 debug = True
-test_time = dt_time(3,30,0)     #Use this with base_time_ranges to trigger a given type of update
+test_time = dt_time(3,0,0)     #Use this with base_time_ranges to trigger a given type of update
 
 testing = False
 
@@ -48,7 +47,6 @@ cascade_absences_url            = 'https://api.iris.co.uk/hr/v2/attendance/absen
 cascade_absencedays             = 'https://api.iris.co.uk/hr/v2/attendance/absencedays'
 cascade_absence_reasons_url     = 'https://api.iris.co.uk/hr/v2/attendance/absencereasons?%24count=true'
 adp_events_url                  = 'https://api.adp.com/core/v1/event-notification-messages'
-
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -59,6 +57,17 @@ SCOPES = [
 # Set up
 
 def findRunType():
+    ''' Decides which Sync to perform based on time.
+    
+    Run Types:  (3) Staff personal and adds new staff (01:00)
+                (1) Push New Cascade Id's back to ADP (Pushes ID for new Staff) (03:00)
+                (4) Updates job details (03:30)
+                (2) Removes deleted and Adds in new and changed Absences (04:00)
+        
+    Returns:    run_type (int): Which of the above syncs to perform
+                overnight (Bool): Absence sync is event based during the day
+    '''
+
     overnight = False
 
     now_uk = datetime.now(ZoneInfo("Europe/London"))
@@ -99,7 +108,6 @@ def findRunType():
         
     # Find matching time range
     for start_time, end_time, run_type in time_ranges:
-        #print (f"{start_time} : {current_time} : {end_time}")
         if start_time <= current_time < end_time:
             overnight = True
             return run_type,overnight
@@ -108,6 +116,8 @@ def findRunType():
     return 2, overnight
 
 def createFolders(current_folder, structure=None, created_paths=None):
+    ''' Creates Folder Structure for debugging and intermediate steps''' 
+
     if created_paths is None:
         created_paths = []
         
@@ -146,6 +156,9 @@ def createFolders(current_folder, structure=None, created_paths=None):
     return created_paths
 
 def deleteFolders():
+    ''' Deletes all folders if they exist at the start of a run.
+        Removes any option for persistence and improves data security'''
+    
     def handle_remove_readonly(func, path, exc_info):
         if isinstance(exc_info[1], PermissionError):
             # Remove readonly attribute and try again
@@ -187,6 +200,8 @@ def deleteFolders():
     time.sleep(1)
 
 def exportData(folder, filename, variable):
+    ''' Exports a given json list stored as a variable to a folder and filename'''  
+
     if data_export:
         file_path = Path(data_store) / folder / filename
         with open(file_path, "w") as outfile:
@@ -2365,8 +2380,6 @@ if __name__ == "__main__":
 
     extended_update,data_export = debugCheck(debug)
     creds, project_Id = googleAuth()
-    print("Service account / identity:", creds.service_account_email if hasattr(creds, 'service_account_email') else "ADC user")
-    gc = gspread.authorize(creds)
 
     x_months_ago = datetime.now() - timedelta(days=180)
     storage_client = storage.Client(credentials=creds,project=project_Id)
