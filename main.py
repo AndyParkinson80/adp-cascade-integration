@@ -32,8 +32,8 @@ from google.cloud import secretmanager, bigquery
 from google.cloud import storage
 import gspread
 
-debug = True
-test_time = dt_time(3,0,0)     #Use this with base_time_ranges to trigger a given type of update
+debug = False
+test_time = dt_time(4,0,0)     #Use this with base_time_ranges to trigger a given type of update
 
 testing = False
 
@@ -47,14 +47,12 @@ cascade_absences_url            = 'https://api.iris.co.uk/hr/v2/attendance/absen
 cascade_absencedays             = 'https://api.iris.co.uk/hr/v2/attendance/absencedays'
 cascade_absence_reasons_url     = 'https://api.iris.co.uk/hr/v2/attendance/absencereasons?%24count=true'
 adp_events_url                  = 'https://api.adp.com/core/v1/event-notification-messages'
+
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/cloud-platform"
 ]
-
-
-# Set up
 
 def findRunType():
     ''' Decides which Sync to perform based on time.
@@ -65,7 +63,7 @@ def findRunType():
                 (2) Removes deleted and Adds in new and changed Absences (04:00)
         
     Returns:    run_type (int): Which of the above syncs to perform
-                overnight (Bool): Absence sync is event based during the day
+                overnight (Bool): Absence sync is event based during the day and all staff when overnight
     '''
 
     overnight = False
@@ -208,11 +206,23 @@ def exportData(folder, filename, variable):
             json.dump(variable, outfile, indent=4)
 
 def load(folder,filename,variable_name):
+    ''' Imports a json list from folder and filename to a global variable'''  
+
     file_path = Path(data_store) / folder / filename
     with open(file_path,"r") as file:
         globals()[variable_name] = json.load(file)
     
 def googleAuth():
+    ''' Authentificates with the google cloud services.
+
+        1. Try to use a local set of credentials stored as an environmental variable (Local Development)
+        2. Uses Application Default Credentials (Cloud run)
+        3. Uses service account stored in Codespaces secrets (GitHub codespaces)
+
+    Return:     projectId (Str)
+                Credentials object (None)
+    '''
+
     # 1. Local dev — prefer service account file to avoid ADC scope issues
     file_path = os.getenv("GCP")
     if file_path and os.path.exists(file_path):
@@ -245,29 +255,50 @@ def googleAuth():
         raise Exception("❌ No valid authentication method found")    
     
 def debugCheck(debug):
+    ''' Sets variables based on debug value
+    
+    Debug is True: Exports data to local files, creates folders if not there
+    Debug is False: No exported data
+    '''
     if debug:
         if testing is False:
             createFolders(current_folder)     
-        extended_update = False                                          
         data_export = True
     
     else:
-        extended_update = True                                                            
         data_export = False
                     
-    return extended_update,data_export
+    return data_export
 
 def dataStoreLocation(country):
+    '''Sets data location based on country
+    
+    Args: Country (Str)
+    Returns: path for data folder
+
+    '''
     folder_name = f"Data - {country.upper()}"
     return os.path.join(current_folder, "Data Store", folder_name)
 
 def getSecret(secret_id, version_id="latest"):
+    ''' Downloads secretvalue from Google Secret Manager
+
+    Args: Secret_id (Str), version_id set as latest as default
+    Returns: Value of secret (Str)
+    
+    '''
     client = secretmanager.SecretManagerServiceClient(credentials=creds)
     name = f"projects/{project_Id}/secrets/{secret_id}/versions/{version_id}"
     response = client.access_secret_version(request={"name": name})
     return response.payload.data.decode("UTF-8")
 
 def loadKeys(country):
+    ''' Iterates through a list of secret values and calls the getSecret function.
+    
+    Args:       Country (str)
+    Return:     String for all requested secrets
+    '''
+
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"    Gathering Security Information ({now_str})")
     print(f"        Loading Security Keys ({now_str})")
@@ -298,8 +329,7 @@ def loadKeys(country):
     )
 
 def loadSsl(certfile_content, keyfile_content):
-    """
-    Create temporary files for the certificate and keyfile contents.
+    """ Create temporary files for the certificate and keyfile contents.
     
     Args:
         certfile_content (str): The content of the certificate file.
@@ -328,6 +358,15 @@ def loadSsl(certfile_content, keyfile_content):
         raise e
 
 def adpBearer(client_id,client_secret,certfile,keyfile):
+    ''' Retrieves the ADP OAuth access token
+
+    Args:   Client_id (str): ADP supplied client id
+            Client_secret (str): ADP supplied client secret
+            certfile, keyfile (None): SSL certificate - generated from secret manager
+
+    Return: access_token (str)
+            
+    '''
     adp_token_url = 'https://accounts.adp.com/auth/oauth/v2/token'                                                                                          
 
     adp_token_data = {
@@ -346,6 +385,12 @@ def adpBearer(client_id,client_secret,certfile,keyfile):
     return access_token
 
 def cascadeBearer (cascade_API_id):
+    ''' Retrieves the Cascade OAuth access token
+    
+    Args:   Cascade_API_Id (str)
+    Return: cascade_token (str)
+
+    '''
     cascade_token_url='https://api.iris.co.uk/oauth2/v1/token'
     
     cascade_token_data = {
@@ -367,6 +412,16 @@ def cascadeBearer (cascade_API_id):
 # API Calls
 
 def apiCountAdp(page_size,url,headers,type):
+    ''' Finds the necessary number of pages for a set of data using record count and page size
+        Used once at the start of the api_call
+
+    Args:   page_size (int):        Maximum number of records returned in a single API call
+            url (str):          URL for the endpoint in use
+            headers (None):         Contains header values for API call - Usually contains bearer token and content type
+            type (str):             filters staff by active, leave or terminated
+    
+    Return: api_calls (str): Total number of times the api will need to be called to retrieve all data 
+    '''
 
     api_count_params = {
             "$filter": f"workers/workAssignments/assignmentStatus/statusCode/codeValue eq '{type}'",
@@ -381,7 +436,17 @@ def apiCountAdp(page_size,url,headers,type):
     return api_calls
 
 def apiCall(page_size,skip_param,api_url,api_headers,type):
+    ''' Makes an API call to ADP endpoints
+
+    Args:   page_size_url (int):    Maximum number of records returned in a single API call
+            skip_param (int):       Used to offset the records when paginating
+            api_url (str):          URL for the endpoint in use
+            api_headers (None):     Contains header values for API call - Usually contains bearer token and accepted content type
+            type (str):             filters staff by active, leave or terminated        
     
+    Return: api_response (list):    Raw reponse data from API call
+    '''
+
     api_params = {
     "$filter": f"workers/workAssignments/assignmentStatus/statusCode/codeValue eq '{type}'",
     "$top": page_size,
@@ -394,6 +459,15 @@ def apiCall(page_size,skip_param,api_url,api_headers,type):
     return api_response    
 
 def apiCountCascade(api_response,page_size):
+    ''' Finds the necessary number of pages for a set of data using record count and page size
+        Used once at the start of the api_call
+
+    Args:   api_reponse (list):     response from api_call, will contain the total number of records in metadata
+            page_size (int):        Maximum number of records returned in a single API call
+    
+    Return: api_calls (str): Total number of times the api will need to be called to retrieve all data 
+    '''
+
     response_data = api_response.json()
     total_number = response_data['@odata.count']
     api_calls = math.ceil(total_number / page_size)
@@ -401,6 +475,16 @@ def apiCountCascade(api_response,page_size):
     return api_calls
 
 def apiCallCascade(cascade_token,api_url,api_params=None,api_data=None):
+    ''' Makes an API call to Cascade endpoints
+
+    Args:   cascade_token (str):    Access bearer token for Cascade API calles 
+            api_url (str):          URL for the endpoint in use
+            api_params (str):       contains page size and skip parameters - Nullable
+            api_data (str):         Tag for removal
+    
+    Return: api_response (list):    Raw reponse data from API call
+    '''   
+   
     cascade_api_headers = {
     'Authorization': f'Bearer {cascade_token}',
     }
@@ -411,6 +495,16 @@ def apiCallCascade(cascade_token,api_url,api_params=None,api_data=None):
     return api_response
 
 def apiCallEvents(page_size,skip_param,api_url,api_headers):
+    ''' Used to retrieve Event Notifications from ADP
+
+    Args:   page_size (int):        Maximum number of records returned in a single API call
+            skip_param (int):       Used to offset the records when paginating
+            api_url (str):          URL for the endpoint in use
+            api_headers (None):     Contains header values for API call - Usually contains bearer token and content type
+            type (str):             filters staff by active, leave or terminated        
+    
+    Return: api_response (list):    Raw reponse data from API call
+    '''
     
     api_params = {
     "$top": page_size,
@@ -425,6 +519,8 @@ def apiCallEvents(page_size,skip_param,api_url,api_headers):
 # Global Data Calls
 
 def statusType(status):
+    '''Converts between word (used in download) and initial (backup for missing dictionary key)'''
+    
     status_map = {
         "active": "A",
         "terminated": "T",
@@ -433,7 +529,11 @@ def statusType(status):
     return status_map.get(status)
 
 def getWorkersAdp():
-
+    ''' Downloads the current data from ADP workers
+    
+        Return: list of dictionary for all staff split by worker category
+    '''
+    
     global adp_active,adp_terminated,adp_leave
     adp_active = []
     adp_terminated = []
@@ -475,6 +575,11 @@ def getWorkersAdp():
     return adp_active, adp_leave, adp_terminated
 
 def getWorkersCascade():
+    ''' Downloads the current data from Cascade workers
+    
+        Return: list of dictionary for all staff currently on roll
+    '''
+
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("    Retrieving current Personal Data from Cascade HR (" + time_now + ")")
     global cascade_responses
@@ -507,33 +612,48 @@ def getWorkersCascade():
     return cascade_responses
 
 def getHierarchyNodes(hierarchy_ids,url,headers):
-        hierarchy_nodes = []
-        hierarchy_id_nodes = []
+    ''' Generates all child nodes for a given Hierarchy Node
 
-        for h_id in hierarchy_ids:
-            params = {
-                "$filter": f"parentId eq '{h_id}' and disabled eq false"
-            }
+    Args:   hierarchy_ids (str):        Given hierarchy node
 
-            for attempt in range(2):  # Attempt up to 2 times
-                response = requests.get(url, params=params, headers=headers)
-                time.sleep(0.6)  # Always sleep between requests
+    Return: hierarchy_nodes (list):     Full hierarchy nodes for all child nodes of Arg
+            hierarchy_id_nodes (list):  Id's for all the nodes above.
+    '''  
 
-                if response.status_code == 200:
-                    data = response.json()
-                    for record in data.get('value', []):
-                        hierarchy_nodes.append(record)
-                        hierarchy_id_nodes.append(record['Id'])
-                    break  # Exit retry loop on success
-                elif attempt == 0:
-                    print(f"            Request failed for parentId {h_id}, retrying in 1 second...")
-                    time.sleep(3)
-                else:
-                    print(f"            Failed to retrieve data for parentId {h_id}: {response.status_code}")
+    hierarchy_nodes = []
+    hierarchy_id_nodes = []
 
-        return hierarchy_nodes, hierarchy_id_nodes
+    for h_id in hierarchy_ids:
+        params = {
+            "$filter": f"parentId eq '{h_id}' and disabled eq false"
+        }
+
+        for attempt in range(2):  # Attempt up to 2 times
+            response = requests.get(url, params=params, headers=headers)
+            time.sleep(0.6)  # Always sleep between requests
+
+            if response.status_code == 200:
+                data = response.json()
+                for record in data.get('value', []):
+                    hierarchy_nodes.append(record)
+                    hierarchy_id_nodes.append(record['Id'])
+                break  # Exit retry loop on success
+            elif attempt == 0:
+                print(f"            Request failed for parentId {h_id}, retrying in 1 second...")
+                time.sleep(3)
+            else:
+                print(f"            Failed to retrieve data for parentId {h_id}: {response.status_code}")
+
+    return hierarchy_nodes, hierarchy_id_nodes
+
+def getHierarchyList(country):
+    '''Finds all hierarchy nodes for a given country
+
+    Args:   Country (str):          Either usa or can
+
+    Return: hierarchy_nodes (list): List of all hierarchy nodes beneath initial country top level node
     
-def getHierarchyList(country): 
+    ''' 
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("    Retrieving Job Hierarchy Nodes (" + time_now + ")")
 
@@ -569,11 +689,16 @@ def getHierarchyList(country):
         print(f"Failed to retrieve data: {response.status_code}")
 
     exportData("002 - Security and Global","002 - Hierarchy Nodes.json", hierarchy_nodes)    
-            
-    
+                
     return hierarchy_nodes
 
 def findActiveJobPosition(worker):
+    ''' In ADP, finds the position of the record for the current job
+
+    Args:   worker (dict): Full record for a given employee
+
+    Return: active_job_position (int): Zero indexed position of current job, used later for dictionary lookup  
+    '''
     active_job_position = None
 
     work_assignments = worker.get("workAssignments", [{}])
@@ -584,13 +709,19 @@ def findActiveJobPosition(worker):
     return active_job_position
 
 def findCascadeIdAndContService(ADP_identifier):
+    ''' Matches cascade information for a given ADP AOID
+
+    Args:   ADP_identifier(str): AOID from ADP
+
+    Return: CascadeID (str): Cascade Front End identifier
+            Cascade_full (str): Cascade API individual identifier
+            contServiceCascade (str): Continuous Service Date from Cascade if availabble
+    '''
+
     CascadeID = Cascade_full = contServiceCascade = None
-    #print (ADP_identifier)
     for entry in cascade_responses:
-        # Safely get the NationalInsuranceNumber or skip if missing
         if str(entry.get("NationalInsuranceNumber")) == str(ADP_identifier):
-            #print (entry.get("NationalInsuranceNumber"))
-            #print (ADP_identifier)
+
             CascadeID = entry.get("DisplayId")
 
             if CascadeID is None:
@@ -598,10 +729,18 @@ def findCascadeIdAndContService(ADP_identifier):
             else:
                 Cascade_full = entry.get("Id")
                 contServiceCascade = entry.get("ContinuousServiceDate")
-            break  # Exit loop once a match is found
+            break 
     return CascadeID,Cascade_full,contServiceCascade
 
 def findHierarchyId(job_code,job_name,hierarchy_library): 
+    ''' Converts job code and name to hierarchy
+    
+    Args:   job_code (str): job code from ADP
+            job_name (str): job name from ADP
+            hierarchy_library (list): all hierarchys for target country
+
+    Return: hierarchy (str): Individual Hierarchy Id for given worker
+    '''    
     hierarchy = None 
 
     # First pass: try exact match (code + name) 
@@ -613,6 +752,13 @@ def findHierarchyId(job_code,job_name,hierarchy_library):
     return hierarchy
 
 def findJobNamesAndCodes(country, adp_responses):
+    ''' Finds the job names and codes from raw adp notes
+
+    Args:   country (str): Either usa or can
+            adp_responses (list): all raw jobs info on ADP
+    
+    Return: unique_job_records(list): All unique jobs in the target country.
+    '''
     job_records = []
 
     for worker in adp_responses:
@@ -644,6 +790,16 @@ def findJobNamesAndCodes(country, adp_responses):
     return unique_job_records
 
 def uploadToGsheets(sheet_name, range, start, data):
+    ''' Uploads data to gsheets.
+
+    Args:   sheet_name(str): Name of sheet - Not the sheetId
+            range (str): Range of data to clear
+            start (str): Absolute value of top right cell in the data
+            data (dict): Data to upload
+    
+    Return: None    
+    '''
+
     spreadsheet_id = getSecret("hierarchy_gsheet_id")
     sh = gc.open_by_key(spreadsheet_id)
     worksheet = sh.worksheet(sheet_name)
@@ -651,6 +807,14 @@ def uploadToGsheets(sheet_name, range, start, data):
     worksheet.update(range_name=start, values=data)
 
 def downloadFromGsheets(sheet_name, range):
+    ''' Downloads data from gsheets
+
+    Args:   sheet_name(str): Name of sheet - Not the sheetId
+            range (str): Range of data to download
+
+    Return:  data range (dict)           
+    '''
+
     spreadsheet_id = getSecret("hierarchy_gsheet_id")
     sh = gc.open_by_key(spreadsheet_id)
     worksheet = sh.worksheet(sheet_name)
@@ -663,12 +827,16 @@ def downloadFromGsheets(sheet_name, range):
     return [dict(zip(headers, row)) for row in data[1:]]
 
 def findUniqueJobsADP(unique_jobs):
+    '''Sorts and uploads the unique jobs for a country and uploads them to gsheets'''
+
     unique_jobs.sort(key=lambda x: (x[0], x[1]))
     rows = [["Job Code", "Job Name"]] + [list(row) for row in unique_jobs]
 
     uploadToGsheets(f"Hierarchy ({c})","A:B","A1",rows)
 
 def findCascadeHierarchylist(nodes):
+    '''Builds all the hierarchy paths from the hierarchy library list and uploads to gsheets'''
+
     children_map = defaultdict(list)
 
     for node in nodes:
@@ -699,6 +867,13 @@ def findCascadeHierarchylist(nodes):
     uploadToGsheets(f"Hierarchy ({c})", "E:G", "E1", results)
 
 def export_to_bq(credentials, project_id: str, data: list[dict],country) -> None:
+    ''' Uploads the ID_library to bigQuery
+
+    Args:   credentials: Access credentials for gcp
+            projectId (str): gcp project id
+            Data (list): All data for ID Library
+            country(str): usa or can - used to identify target table
+    '''
     client = bigquery.Client(project=project_id, credentials=credentials)
 
     full_table_ref = f"{project_id}.library.library_{country}"
@@ -732,6 +907,15 @@ def export_to_bq(credentials, project_id: str, data: list[dict],country) -> None
     print(f"Successfully loaded {len(rows)} rows into '{full_table_ref}'.")
 
 def import_from_bq(credentials, project_id: str, country: str) -> list[dict]:
+    ''' Downloads the ID_library from bigQuery (event driven absences)
+
+    Args:   credentials: Access credentials for gcp
+            projectId (str): gcp project id
+            country(str): usa or can - used to identify target table
+    
+    Return: Data (list): Id Library for use in event-driven absences
+    '''
+
     client = bigquery.Client(project=project_id, credentials=credentials)
 
     full_table_ref = f"{project_id}.library.library_{country}"
@@ -763,6 +947,13 @@ def import_from_bq(credentials, project_id: str, country: str) -> list[dict]:
     return data
 
 def IDGenerator(country,adp_responses):
+    ''' Creates an ID Library for staff for use when synchronising Data
+    
+    Args:   Country (str): usa or can
+            adp_responses (list): all raw adp responses from personal data api
+    
+    Return: ID_library (list[dict]): ID Library for USA/CAN staff.
+    '''
 
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("    Creating an ID library (" + time_now + ")")
@@ -838,8 +1029,16 @@ def IDGenerator(country,adp_responses):
     export_to_bq(creds,project_Id,ID_library,c)
     
     return ID_library
-
+#----------------------------------------
+ 
 def cascadeAbsenceReasons():
+    '''Downloads all absence reasons from Cascade API 
+
+    Args:   None
+    
+    Return: cascade_absence_reasons (list): All absence reasons in Cascade system
+    
+    '''
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("    Retrieving Absence Reasons Data from Cascade HR (" + time_now + ")")
     global cascade_absence_reasons
@@ -872,6 +1071,13 @@ def cascadeAbsenceReasons():
     return cascade_absence_reasons 
 
 def findAbsenceHierarchy(nodes, prefixes):
+    ''' Uploads cascade absence hierarchy to gcloud
+    
+        Args:   Nodes (list): All absence hierarchy from Cascade
+                prefixes (list): absence prefixes for the country in question
+
+        Return: results (list)        
+    '''
     children_map = defaultdict(list)
 
     for node in nodes:
@@ -903,29 +1109,32 @@ def findAbsenceHierarchy(nodes, prefixes):
 # Cascade to ADP (run-type-1)
 #---------------------------------------- Support Functions
 def createCascadeidUpdateList(ID_library, cascade, adp):
-    cascade_exists_in_library = False
+    '''Creates a list of ADP AOID that do not have a cascade ID in the id library
 
-    for record in ID_library:
-        if record["CascadeId"] == cascade:
-            cascade_exists_in_library = True
-            break             
-    
-    if not cascade_exists_in_library:              
-        for record in ID_library:
-            if record["ADP_number"] == adp:
-                cascade = record["CascadeId"]
-                AOID = record["AOID"]
-                break  # Added break for efficiency once match is found
-        
-        transformed_record = {
-            "AOID": AOID,
-            "Cascade": cascade
-            #"Cascade": cascade if cascade is not None else ""  # Use this to strip CascadeId's out of Canadian Records
-        }
+    Args:   ID_library (list): List of all staff
+            cascade (str): Cascade Id
+            adp (str): AOID for given member of staff
+    '''
+    cascade_exists_in_library = any(record["CascadeId"] == cascade for record in ID_library)
 
-        return transformed_record
+    if not cascade_exists_in_library:
+        match = next((record for record in ID_library if record["ADP_number"] == adp), None)
+
+        if match:
+            return {
+                "AOID": match["AOID"],
+                "Cascade": match["CascadeId"]
+            }
 #---------------------------------------- Main Functions
 def whatsInAdp(adp_responses, ID_library,c):
+    '''Creates a list of staff who need a cascade ID adding
+
+    Args:   adp_responses (list): All staff for a given country
+            ID_library (list): All staff Id
+            c (str): usa or can
+
+    Return: ID_reponses (list): All ID's that need adding to ADP
+    '''
     ct_POST_cascade_id = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Finding Id's that are missing on Cascade (" + ct_POST_cascade_id + ")")
 
@@ -954,6 +1163,14 @@ def whatsInAdp(adp_responses, ID_library,c):
     return ID_responses
 
 def uploadCascadeidsToAdp(CascadeId_to_upload,country):
+    '''Adds cascade ID to ADP
+    
+    Args: CascadeId_to_upload (list): All Id's that need adding to ADP
+          country (str): usa or can
+
+    Return: None
+    
+    '''
     ct_POST_cascade_id = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Updating Cascade ID's on WFN (" + ct_POST_cascade_id + ")")
 
@@ -1021,16 +1238,6 @@ def runType1():
 
 # Delete/Update Absences (run-type-2)
 #---------------------------------------- Top Level Function               
-def loadFromBucket(variable):
-    client = storage.Client(credentials=creds, project=project_Id)
-    bucket = client.bucket("event_list_objects")
-    blob = bucket.blob(f"{variable}.json")
-
-    data = json.loads(blob.download_as_text())
-    string_list = data["strings"]
-
-    return string_list
-
 def createAbsencesReasons():
     xlsx_in_memory = loadXlsxFromBucket("Hierarchy")
     df = pd.read_excel(xlsx_in_memory, sheet_name=f"{c} Absences")
@@ -1053,15 +1260,29 @@ def createAbsencesReasons():
     return absence_reasons
 
 def getCascadeId(CascadeId,ID_library):
-    for record in ID_library:
-        if record["CascadeId"] == CascadeId:
-            Cascade_full = record["Cascade_full"]
-            AOID = record["AOID"]
-            break
+    ''' Finds cascadeID and SOID for a display id
     
-    return Cascade_full,AOID
+    Args:   CascadeId (str): Frontend ID for cascade
+            ID_library (list): Lookup table for ADP staff
+
+    Return: Cascade_full (str): Cascade backend ID
+            AOID: ADP internal id
+    
+    '''
+    match = next((record for record in ID_library if record["CascadeId"] == CascadeId), None)
+
+    if match is None:
+        raise ValueError(f"No record found for CascadeId: {CascadeId}")
+
+    return match["Cascade_full"], match["AOID"]
 
 def getAbsencesAdp(AOID):
+    '''Returns absences for a given AOID
+    
+    Args:   AOID(str): ADP Internal Id
+    Return: adp_reponse(list): All absences approved in the last 90 days (ADP limitation)
+    '''
+
     api_url = "https://api.adp.com/time/v2/workers/" + AOID + "/time-off-details/time-off-requests"
     api_headers = {
         'Authorization': f'Bearer {access_token}',
@@ -1082,7 +1303,17 @@ def getAbsencesAdp(AOID):
 
     return adp_response
 
-def convertAdpAbsencesToCascadeFormat(adp_response, absence_reasons, Cascade_full, AOID, ninety_days_ago):
+def convertAdpAbsencesToCascadeFormat(adp_response, absence_reasons, Cascade_full, ninety_days_ago):
+    ''' Converts adp absence report to same as cascade response for comparison
+    
+    Args:   adp_response (dict): All absence responses for a given staff member from adp
+            absence_reasons (dict): Conversion table from USA/CAN absence reasons to Cascade absence reasons
+            Cascade_full (str): Cascade backend individual id
+            ninety_days_ago (dt): Used to limit cascade response to same as adp response
+
+    Return: filtered_records(dict): Dictionary of all approved absences from ADP converted to Cascade format 
+    '''
+    
     requests = adp_response["paidTimeOffDetails"]["paidTimeOffRequests"][0]["paidTimeOffRequestEntries"]
     approved_records = []
 
@@ -1128,6 +1359,14 @@ def convertAdpAbsencesToCascadeFormat(adp_response, absence_reasons, Cascade_ful
     return filtered_records
 
 def cascadeAbsences(Cascade_full,absences_from):
+    ''' Finds all absences in the last x days from cascade
+    
+    Args:   Cascade_full (str): Backend cascade id
+            absences_from (dt): Given date to search from. Normally 90 days to match ADP default behaviour
+    
+    Return: updated_json_data (list): All absences within the last x days
+            absence_id_cascade (list): All IDs for the above absences.
+    '''
 
     cascade_responses = []
     api_params = {
@@ -1165,6 +1404,18 @@ def cascadeAbsences(Cascade_full,absences_from):
     return  updated_json_data,current_absence_id_cascade
 
 def combineJsonFilesForPost(current_absence_id_cascade,adp_current,cascade_current):
+    '''Classifys absences for a given staff member
+    
+    Args:   current_absences_id_cascade (list): Id's of all absences - Used to inform delete function
+            adp_current (list): All absences in ADP for last 90 days
+            cascade_current (list): All absences in cascade for last 90 days
+    
+    Return: new_records(list):  Payload for records that need to be added
+            update_transformed (list): Payload for records that need to be updated/transformed
+            delete_ids (list): list of id's to delete
+            update_ids (list): list of id's to update (used for comparison)
+    '''
+    
     cascade_index = {
         (r['StartDate'], r['EndDate'], r['AbsenceReasonId']): r
         for r in cascade_current
@@ -1224,6 +1475,12 @@ def combineJsonFilesForPost(current_absence_id_cascade,adp_current,cascade_curre
     return new_records, Update_transformed, delete_ids, update_ids
 
 def PostAbsences(new_records,Cascade_full):
+    '''Adds absences to cascade
+    
+    Args:   new_records (list): All absences to add
+            cascade_full (str): specific id to add the absence to.    
+    '''
+
     output=[]
 
     if not new_records:
@@ -1267,9 +1524,13 @@ def PostAbsences(new_records,Cascade_full):
 
         exportData("005 - Absences to Cascade","010 - ADPabsences.json",output)    
         
-    return (output)
 
 def DeleteAbsences(delete_ids):
+    '''Deletes absences that are in cascade but not in adp
+    
+    Args:   delete_ids(list): All absence ids that need to be deleted.
+    
+    '''
 
     exportData("005 - Absences to Cascade","011 - All deleted -ID.json",delete_ids)    
 
@@ -1297,6 +1558,7 @@ def DeleteAbsences(delete_ids):
         time.sleep(0.6)  
 #---------------------------------------- Top Level Function               
 def DeleteEventNotification(id):
+    '''deletes an event notification after it has been downloaded/ achknowledged'''
     delete_url = adp_events_url + "/" + id
 
     api_headers = {
@@ -1308,6 +1570,11 @@ def DeleteEventNotification(id):
     requests.delete(delete_url, cert=(certfile, keyfile), headers=api_headers)
 
 def GetEventsAdp():
+    '''Downloads a single event notification.
+    
+    Return: associate_oid (list): All staff IDs that have an event notification
+
+    '''
     page_size = 100
 
     api_headers = {
@@ -1345,6 +1612,11 @@ def GetEventsAdp():
     return associate_oid  # Return the value instead of recursing
 
 def FindEventAoid():
+    '''Downloads all event notifications from ADP
+    
+    Return: associate_oid_list (list): All ADP ids that have requested at least one change
+    
+    '''
     print(f"       Downloading event Notifications")
     associate_oid_list = []
 
@@ -1361,6 +1633,7 @@ def FindEventAoid():
 
 #---------------------------------------- Top Level Function               
 def runType2(ID_library):
+    '''Syncs absences from ADP to Cascade'''
 
     global adp_absence_categories
     adp_absence_categories = []
@@ -1393,7 +1666,7 @@ def runType2(ID_library):
                 print(f"        No absences for {CascadeId}")
                 continue  # If there are no absences, skip to the next record                
             else:
-                adp_current = convertAdpAbsencesToCascadeFormat(adp_response,absence_reasons,Cascade_full,AOID,ninety_days_ago)                             # Converts ADP absences into Cascade format
+                adp_current = convertAdpAbsencesToCascadeFormat(adp_response,absence_reasons,Cascade_full,ninety_days_ago)                             # Converts ADP absences into Cascade format
                 cascade_current, current_absence_id_cascade = cascadeAbsences(Cascade_full,absences_from)                                                   # Pulls list of current absences
                 new_records, Update_transformed, delete_ids, update_ids = combineJsonFilesForPost(current_absence_id_cascade,adp_current,cascade_current)   # Compares adp and cascade and removes any that are already in cascade
 
@@ -1420,6 +1693,13 @@ def runType2(ID_library):
 # Update Personal Details (Run Type 3)
 #---------------------------------------Support Functions
 def makeApiRequest(DisplayId):
+    ''' Finds the start date and Id from a cascade Id
+
+    Args:   DisplayId (str): Internal Cascade Id (Front End)
+
+    Return: Cascade_full_id (str): Cascade ID for backend
+            cont_service (dt): Start Date for continuous service calculations.
+    '''
 
     api_params = {
         "$filter": f"DisplayId eq '{DisplayId}'",
@@ -1470,25 +1750,34 @@ def loadXlsxFromBucket(name):
 
     return xlsx_file
 
-def findCascadePersonalDataFromId(ADP_id, ID_library, display_id,start_date):
-    contServiceSplit = start_date  # Default value if no record is found
-    Id = None
-   
-    for entry in ID_library:
-        if entry["ADP_number"] == ADP_id and entry["CascadeId"] is None:
-            contService = entry["contServiceDate"]
-            contServiceSplit = contService.split("T")[0]
-            Id = None
-            break  # Exit the loop once a match is found
-        elif entry["CascadeId"] == display_id:
-            contService = entry["contServiceDate"]
-            contServiceSplit = contService.split("T")[0]
-            Id = entry["Cascade_full"]   
-            break  # Exit the loop once a match is found
-    
-    return contServiceSplit,Id
+def findCascadePersonalDataFromId(ADP_id, ID_library, display_id, start_date):
+    '''Finds the continuous Service data and full cascade data for a given cascade Id and start Date) 
+
+    Args:   ADP_id (tr): Internal identifier from ADP
+            ID_library (list): Lookup for ID values
+            display_id (str): FrontEnd Id from cascade
+            startdate (dt): StartDatee from cascade record
+
+    '''
+    match = next(
+        (entry for entry in ID_library
+         if (entry["ADP_number"] == ADP_id and entry["CascadeId"] is None)
+         or entry["CascadeId"] == display_id),
+        None
+    )
+
+    if match is None:
+        return start_date, None
+
+    cont_service_split = match["contServiceDate"].split("T")[0]
+
+    if match["ADP_number"] == ADP_id and match["CascadeId"] is None:
+        return cont_service_split, None
+
+    return cont_service_split, match["Cascade_full"]
 
 def convertUsaTerminologyToUkTerminology(workingStatus,end_date,mobileOwner):
+    ''' Converts specific US terminology into cascade required format'''
     if workingStatus == "Active":
         workingStatus = "Current"
     if workingStatus == "Inactive":                     #This may be removed later - discussion needed AP/KG
@@ -1507,6 +1796,14 @@ def convertUsaTerminologyToUkTerminology(workingStatus,end_date,mobileOwner):
     return workingStatus,end_date,mobileOwner
 
 def findContService(contServiceSplit,start_date):
+    '''Deals with Edge case where staff have left and returned.
+    
+    Args:   contServiceSplit (dt): Continuous Service date from ADP
+            start_date (dt): StartDate for this employment in ADP
+
+    Return: contServiceSplit (dt): Updated value for continuous service date
+    '''
+
     employment_start_date = datetime.strptime(start_date, "%Y-%m-%d")
     continuous_service_date = datetime.strptime(contServiceSplit, "%Y-%m-%d")
        
@@ -1530,7 +1827,16 @@ def createInitials(preferred,firstname,other_name):
     
     return initials
 #---------------------------------------Main Functions
-def convertAdpToCascadeForm(records,suffix,terminations,ID_library,x_months_ago=None):                         
+def convertAdpToCascadeForm(records,suffix,terminations,ID_library,x_months_ago=None):
+    ''' Converts the ADP personal data into the required format for Cascade
+    
+    Args:   records (list): All ADP records to convert
+            suffix(str): Identifies the terninated staff for conversion
+            ID_library (list): Data conversion list
+
+    Return: output (list): Converted ADP records            
+    '''                         
+    
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Converting the adp data to the cascade form (" + time_now+ ")")
 
@@ -1654,6 +1960,14 @@ def convertAdpToCascadeForm(records,suffix,terminations,ID_library,x_months_ago=
     return output
 
 def cascadeRejigPersonal(cascade_responses):
+    '''Converts the raw data from Cascade into the format that would be needed for the POST/PUT api call
+    
+    Args:   cascade_responses (list): All raw personal data from Cascade api
+
+    Return: cascade_reordered (list): Cascade data reformated for PUT/POST - Used in comparison with ADP data
+    
+    '''
+    
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Faffling about with the order of Cascade to allow comparison (" + time_now + ")")
 
@@ -1699,6 +2013,17 @@ def cascadeRejigPersonal(cascade_responses):
     return cascade_reordered
 
 def combineJsonFiles(adp_to_cascade_terminated,adp_to_cascade,cascade_reordered):
+    ''' Categorises staff by employment status by comparing ADP and Cascade staff lists
+    
+    Args:   adp_to_cascade_terminated (list): All terminated staff from ADP in cascade format
+            adp_to_cascade (list): All current staff in ADP converted to cascade format
+            cascade_reordered (list): All current staff in Cascade
+
+    Return: update_personal (list): Creates a list of changed records - Informs a PUT api call
+            new_starters (list):  List of new starters - informs a POST api call
+            processed_unterminated_records (list): All staff terminated in ADP to be set as leavers in Cascade
+    ''' 
+
     ct_combining_personal = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Generating a list of files that need updating (" + ct_combining_personal + ")")
     
@@ -1712,15 +2037,12 @@ def combineJsonFiles(adp_to_cascade_terminated,adp_to_cascade,cascade_reordered)
                 unique_entries.append((entry, idx))
     
     update_personal = [entry for entry, _ in unique_entries]
-    idx_list = [idx for _, idx in unique_entries]
-    idx_tuple = tuple(idx_list)
 
     new_starters = [entry for entry in adp_to_cascade if entry.get('DisplayId') in [None,""]]
     print("             New Staff: "+str(len(new_starters)))
 
     update_personal = [entry for entry in update_personal if entry.get('DisplayId') not in [None,""]]
     print("             Updating Staff: "+str(len(update_personal)))
-
 
     unterminated_staff = [entry for entry in adp_to_cascade_terminated 
                             if any(c.get('DisplayId') == entry.get('DisplayId') and c.get('LastWorkingDate') is None 
@@ -1764,6 +2086,12 @@ def combineJsonFiles(adp_to_cascade_terminated,adp_to_cascade,cascade_reordered)
     return update_personal, new_starters, processed_unterminated_records
 
 def PutCascadeWorkersPersonal(list_of_staff):
+    ''' Takes list of staff who need updating and performs PUT api call
+
+    Args:   list_of_staff (list): All staff who have a minor change in their data
+
+    '''
+    
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Updating Staff changes (" + time_now + ")")                         
     
@@ -1799,6 +2127,12 @@ def PutCascadeWorkersPersonal(list_of_staff):
         time.sleep(0.6) 
     
 def PostNewStarters(new_starters): 
+    ''' Takes list of staff who need adding and performs POST api call
+
+    Args:   new_starters (list): All staff who have no personal data record on Cascade
+
+    '''
+    
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Adding new staff (" + time_now + ")")                              
     for entry in new_starters:
@@ -1826,6 +2160,8 @@ def PostNewStarters(new_starters):
 
 #---------------------------------------- Top Level Function   
 def runType3():
+    ''' Runs a synchronisation between personal data in ADP and Cascade'''
+
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("    Updating personal details on Cascade (" + time_now + ")")
 
@@ -1844,6 +2180,7 @@ def runType3():
 # Update Job Details (Run Type 4)
 #---------------------------------------Support Functions
 def createParams(page_size, skip_param):
+    ''' Creates the api paramaters for job api calls'''
     api_params = {
         "$filter": "EndDate eq null",
         "$top": page_size,
@@ -1852,6 +2189,8 @@ def createParams(page_size, skip_param):
     return api_params 
 
 def findContract(c,worker,active_job_position):
+    ''' Finds the type of contract (Permenant/contract'''
+
     base = worker["workAssignments"][active_job_position]
     if c == "usa":
         contract = (
@@ -1863,6 +2202,15 @@ def findContract(c,worker,active_job_position):
     return contract
 
 def searchIdLibrary(ID_library,ADP_id):
+    ''' Finds support info from ID library
+
+    Args:   ID_library (List): ADP lookup table
+            ADP_id (str): Internal ADP identifier
+
+    Return: employee_id (str): Cascade internal id
+            hierarchy_id (str): Internal Id for given hierarchy node
+    '''
+    
     for record in ID_library:
         if record["ADP_number"]==ADP_id:
             employee_id = record["Cascade_full"]
@@ -1871,6 +2219,15 @@ def searchIdLibrary(ID_library,ADP_id):
     return employee_id,hierarchy_id   
 
 def findLineManager(ID_library,LM_AOID,employee_id):
+    ''' Find line manager for given staff member
+
+    Args:   ID_library (List): ADP lookup table
+            LM_AOID (str): ADP AOID for the staff members Line Manager
+            employee_id (str):  Employee Id (Cascade frontend)
+    
+    Return: line_manager (str): Cascade backend Id for line manager    
+    '''
+
     xlsx_in_memory = loadXlsxFromBucket("Hierarchy")
     df = pd.read_excel(xlsx_in_memory, sheet_name='JJ')
     reports_to_JJ = df['ID'].tolist()
@@ -1886,6 +2243,7 @@ def findLineManager(ID_library,LM_AOID,employee_id):
     return line_manager
 
 def choosePaybasis(paybasis_hourly):
+    ''' Set paybasis, assumption is Hourly'''
     if paybasis_hourly is not None:
         paybasis = "Hourly"
     else:
@@ -1893,6 +2251,8 @@ def choosePaybasis(paybasis_hourly):
     return paybasis
 
 def roundSalary(pay_hourly,pay_annual):
+    ''' Returns 2 digit pay for comparison (i.e. 13.5 --> 13.50)'''
+
     try:
         if pay_hourly is not None:
             salary = float(pay_hourly)
@@ -1905,12 +2265,25 @@ def roundSalary(pay_hourly,pay_annual):
     return salary,salary_rounded
 
 def changeContractLanguage(contract):
+    '''Set contract type based on ADP language'''
+
     permanent_codes = {"Full Time", "FT", "FTR", "FTOL", "Regular Full-Time","F"}
     if contract in permanent_codes:
         return "Permenent"
     return "Temporary"
 
 def findChangeReason(record,salary,hierarchy_id,line_manager,startDate):
+    ''' Defines change reason for new job line
+    
+    Args:   record (dict): Generated record based on ADP record
+            salary (float): current alary from cascade
+            hierarchy_id (str): Current hierarchy node id from cascade
+            line_manager (str): Id of current line manager
+            startDate (dt): Current startdate from cascade
+
+    Return: changeReason (str): Predefined change reason from system list on cascade 
+    '''
+
     if str(record.get("Salary")) != str(salary):
         changeReason = "Change of Salary"
     elif str(record.get("HierarchyNodeId")) != str(hierarchy_id):
@@ -1924,6 +2297,14 @@ def findChangeReason(record,salary,hierarchy_id,line_manager,startDate):
     return changeReason
 
 def findStartDate(effective_date_wage,cascadeStart,effective_date_other):
+    '''Finds startDate of new job line
+    
+    Args:   effective_date_wage (dt): Date on ADP when wage was last changed
+            cascadeStart (dt): Start date for cascade record
+            effective_date_other (dt): Other random efective date on ADP record - still haven't figured out why this is there.
+
+    Return: startDate (dt): Start date for job record
+    '''
     cascade = datetime.strptime(cascadeStart, "%Y-%m-%d")
 
     try:
@@ -1936,6 +2317,14 @@ def findStartDate(effective_date_wage,cascadeStart,effective_date_other):
     return startDate
 
 def findNewStarters(records_to_add,ID_library):
+    ''' Identifies new starters in the ID library
+    
+    Args:   records_to_add(list): All new starters
+            ID_library (List): ADP lookup table
+    
+    Return: new_start_jobs(list): All staff who will need a job line adding
+     
+    '''
     employee_ids = {record["EmployeeId"] for record in records_to_add}
 
     new_start_jobs = [
@@ -1946,6 +2335,8 @@ def findNewStarters(records_to_add,ID_library):
     return new_start_jobs
 
 def findName(employeeId):
+    '''Generates employee Name from employeeId'''
+
     match = next((item for item in cascade_responses if item["Id"] ==employeeId),None)
 
     if match:
@@ -1956,6 +2347,11 @@ def findName(employeeId):
 
 #---------------------------------------Main Functions
 def cascadeCurrentJobs():
+    ''' Downloads all current job records in Cascade
+    
+    Return: cascade_jobs(list): All job records on cascade
+    '''
+    
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("    Retrieving current Personal Data from Cascade HR (" + time_now + ")")
     global cascade_jobs
@@ -1985,6 +2381,13 @@ def cascadeCurrentJobs():
     return cascade_jobs
 
 def cascadeRejigJobs(cascade_current_jobs):
+    ''' Converts cascade jobs into format for uploading
+
+    Args:  cascade_current_jobs (list): All raw jobs data from cascade
+
+    Return: most current job per ID, arranged in uploading format.
+    '''
+    
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Faffling about with the order of Cascade to allow comparison (" + time_now + ")")
 
@@ -2042,6 +2445,16 @@ def cascadeRejigJobs(cascade_current_jobs):
     return filtered_records
 
 def adpRejig(cascade_current,adp_responses,ID_library):
+    ''' Rearranges adp_responses into cascade job records
+
+    Args:   cascade_current (list): All records of current staff in cascade
+            adp_responses (list): All personal records of staff from ADP
+            ID_library (List): ADP lookup table
+    
+    Return: transformed_records (list): All staff whose records need updating
+            new_start_jobs (list): All staff with no job line
+    '''
+
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Faffling about with the Jobs info to upload to Cascade (" + time_now + ")")
 
@@ -2134,6 +2547,15 @@ def adpRejig(cascade_current,adp_responses,ID_library):
     return transformed_records,new_start_jobs   
 
 def adpRejigNewStarters(new_starters,adp_responses,ID_library):
+    ''' Rearranges adp_responses into cascade job records for new starter
+
+    Args:   new_starters (list): New starters to add
+            adp_responses (list): All personal records of staff from ADP
+            ID_library (List): ADP lookup table
+    
+    Return: transformed_records (list): Staff whose records need adding
+    '''
+        
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Faffling about with the New Staff Jobs info to upload to Cascade (" + time_now + ")")
     new_start = []
@@ -2203,6 +2625,13 @@ def adpRejigNewStarters(new_starters,adp_responses,ID_library):
     return transformed_records
                         
 def classifyAdpFiles(new_start_jobs,adp_current,cascade_current):
+    ''' Classify if jobs are for adding or updating.
+
+    Return: PUT_jobs(list): Job records that need to be updated
+            POST_jobs(list): Job records that need to be added.    
+            
+    '''
+    
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("        Classify current staff jobs as new line or updated record (" + time_now + ")")
     not_to_be_updated = []
@@ -2247,7 +2676,8 @@ def classifyAdpFiles(new_start_jobs,adp_current,cascade_current):
     return PUT_jobs, POST_jobs
 
 def PutUpdateJobChange(PUT_jobs):
-    
+    '''Updates job records'''
+
     print ("            Updating records that are already present")
     for record in PUT_jobs:
         update_record = {
@@ -2303,63 +2733,65 @@ def PutUpdateJobChange(PUT_jobs):
         time.sleep(0.6)
 
 def PostCreateJobs(POST_jobs, new_start_jobs):
-                
-        print ("            Adding new job lines")
-        combined_list = POST_jobs + new_start_jobs
+    '''Adds in new job records'''      
+    print ("            Adding new job lines")
+    combined_list = POST_jobs + new_start_jobs
 
-        for record in combined_list:
-            update_record = {
-            "JobTitle": record["JobTitle"],
-            "Classification": record["Classification"],
-            "StartDate": record["StartDate"],
-            "EndDate": record["EndDate"],
-            "WorkingCalendar": record["WorkingCalendar"],
-            "LineManagerId": record["LineManagerId"],
-            "HierarchyNodeId": record["HierarchyNodeId"],
-            "Active": record["Active"],
-            "Salary": record["Salary"],
-            "EmployeeId": record["EmployeeId"],
-            "Contract": record["Contract"],
-            "PayFrequency": record["PayFrequency"],
-            "PayBasis": record["PayBasis"],
-            "FullTimeEquivalent": record["FullTimeEquivalent"],
-            "ChangeReason": record["ChangeReason"],
-            "NextIncrementDate": record["NextIncrementDate"],
-            "TimesheetLocation": record["TimesheetLocation"],
-            "TimesheetLunchDuration": record["TimesheetLunchDuration"],
-            "ExpenseSubmissionFrequency": record["ExpenseSubmissionFrequency"],
-            "CostCentre": record["CostCentre"],
-            "JobFamily": record["JobFamily"],
-            "ApprenticeUnder25": record["ApprenticeUnder25"],
-            "ApprenticeshipEndDate": record["ApprenticeshipEndDate"],
-            "ContractEndDate": record["ContractEndDate"],
-            "NormalHours": record["NormalHours"],
-            "RealTimeInformationIrregularFrequency": record["RealTimeInformationIrregularFrequency"],
-            "NoticePeriod": record["NoticePeriod"]
-            }
-            employeeId = record["EmployeeId"]
+    for record in combined_list:
+        update_record = {
+        "JobTitle": record["JobTitle"],
+        "Classification": record["Classification"],
+        "StartDate": record["StartDate"],
+        "EndDate": record["EndDate"],
+        "WorkingCalendar": record["WorkingCalendar"],
+        "LineManagerId": record["LineManagerId"],
+        "HierarchyNodeId": record["HierarchyNodeId"],
+        "Active": record["Active"],
+        "Salary": record["Salary"],
+        "EmployeeId": record["EmployeeId"],
+        "Contract": record["Contract"],
+        "PayFrequency": record["PayFrequency"],
+        "PayBasis": record["PayBasis"],
+        "FullTimeEquivalent": record["FullTimeEquivalent"],
+        "ChangeReason": record["ChangeReason"],
+        "NextIncrementDate": record["NextIncrementDate"],
+        "TimesheetLocation": record["TimesheetLocation"],
+        "TimesheetLunchDuration": record["TimesheetLunchDuration"],
+        "ExpenseSubmissionFrequency": record["ExpenseSubmissionFrequency"],
+        "CostCentre": record["CostCentre"],
+        "JobFamily": record["JobFamily"],
+        "ApprenticeUnder25": record["ApprenticeUnder25"],
+        "ApprenticeshipEndDate": record["ApprenticeshipEndDate"],
+        "ContractEndDate": record["ContractEndDate"],
+        "NormalHours": record["NormalHours"],
+        "RealTimeInformationIrregularFrequency": record["RealTimeInformationIrregularFrequency"],
+        "NoticePeriod": record["NoticePeriod"]
+        }
+        employeeId = record["EmployeeId"]
 
-            full_name = findName(employeeId)
+        full_name = findName(employeeId)
 
-            api_url = 'https://api.iris.co.uk/hr/v2/jobs'
+        api_url = 'https://api.iris.co.uk/hr/v2/jobs'
 
-            headers = {
-                'accept': 'application/json;odata.metadata=minimal;odata.streaming=true; version=2',
-                'Authorization': f'Bearer {cascade_token}',
-                'Content-Type':'text/json; version=2',
+        headers = {
+            'accept': 'application/json;odata.metadata=minimal;odata.streaming=true; version=2',
+            'Authorization': f'Bearer {cascade_token}',
+            'Content-Type':'text/json; version=2',
 #                'Content-Length': '22',
-            }
-            
-            response = requests.post(api_url, headers=headers, json=update_record)
-            
-            if response.status_code == 201:
-                print("        " + f'New Job line added for {full_name} complete')
-            else:
-                print("        "+f'Data Transfer for {full_name} has failed. Response Code: {response.status_code}')           
-            time.sleep(0.6)
+        }
+        
+        response = requests.post(api_url, headers=headers, json=update_record)
+        
+        if response.status_code == 201:
+            print("        " + f'New Job line added for {full_name} complete')
+        else:
+            print("        "+f'Data Transfer for {full_name} has failed. Response Code: {response.status_code}')           
+        time.sleep(0.6)
 
 #---------------------------------------- Top Level Function               
 def run_type_4():
+    ''' Updates job records'''
+
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("    Updating Job details on Cascade (" + time_now + ")")
     
@@ -2378,8 +2810,9 @@ if __name__ == "__main__":
     if testing is False:
         deleteFolders()                                #clears out at the start of every run. Can be recreated if needed
 
-    extended_update,data_export = debugCheck(debug)
+    data_export = debugCheck(debug)
     creds, project_Id = googleAuth()
+    gc = gspread.authorize(creds)
 
     x_months_ago = datetime.now() - timedelta(days=180)
     storage_client = storage.Client(credentials=creds,project=project_Id)
@@ -2389,7 +2822,7 @@ if __name__ == "__main__":
         print (f"Synchronizing country: {c}")                                           #c represents country. Either USA or CAN
         print (f"Overnight is {overnight}")
 
-        global access_token, cascade_token, certfile, keyfile, strings_to_exclude, extended_update
+        global access_token, cascade_token, certfile, keyfile, strings_to_exclude
         global Data_export, data_store,country_hierarchy_USA, country_hierarchy_CAN
         
         data_store = dataStoreLocation(c)
