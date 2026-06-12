@@ -33,7 +33,7 @@ from google.cloud import storage
 import gspread
 
 debug = False
-test_time = dt_time(4,0,0)     #Use this with base_time_ranges to trigger a given type of update
+test_time = dt_time(1,0,0)     #Use this with base_time_ranges to trigger a given type of updatek
 
 testing = False
 
@@ -743,11 +743,18 @@ def findHierarchyId(job_code,job_name,hierarchy_library):
     '''    
     hierarchy = None 
 
-    # First pass: try exact match (code + name) 
+    # First pass: try exact match (code + name)   
     for item in hierarchy_library: 
         if str(item["Job Code"]) == str(job_code) and str(item["Job Name"]) == str(job_name): 
             hierarchy = str(item["CascadeId"])
             break 
+
+    # Second pass: fallback to name-only match
+    if not hierarchy:
+        for item in hierarchy_library:
+            if str(item["Job Name"]) == str(job_name):
+                hierarchy = str(item["CascadeId"])
+                break
                    
     return hierarchy
 
@@ -1229,7 +1236,7 @@ def uploadCascadeidsToAdp(CascadeId_to_upload,country):
         else:
             print("        "+f'Response Code: {req.status_code}')
 #---------------------------------------- Top Level Function
-def runType1():
+def cascadeIdSync():
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print ("    Pushing Cascade Id's back to ADP (" + time_now + ")")
 
@@ -1632,7 +1639,7 @@ def FindEventAoid():
     return associate_oid_list
 
 #---------------------------------------- Top Level Function               
-def runType2(ID_library):
+def absencesSync(ID_library):
     '''Syncs absences from ADP to Cascade'''
 
     global adp_absence_categories
@@ -1875,6 +1882,9 @@ def convertAdpToCascadeForm(records,suffix,terminations,ID_library,x_months_ago=
         ADP_id = worker["workAssignments"][active_job_position]["positionID"]
         leave_reason_code = worker["workAssignments"][active_job_position].get("assignmentStatus", {}).get("reasonCode", {}).get("codeValue")
         leave_reason = next((termination.get("Cascade_Reason") for termination in terminations if termination.get("ADP_Code") == leave_reason_code), None)
+
+        if leave_reason_code == "A" and (datetime.now().date() - datetime.strptime(start_date, "%Y-%m-%d").date()).days <= 90:
+            leave_reason = "Failed Probation - timekeeping/attendance"
 
         #Change any of the language from ADP to Iris HR        
         workingStatus,end_date,mobileOwner = convertUsaTerminologyToUkTerminology(workingStatus,end_date,mobileOwner)
@@ -2159,7 +2169,7 @@ def PostNewStarters(new_starters):
         time.sleep(0.6)  
 
 #---------------------------------------- Top Level Function   
-def runType3():
+def personalDetailsSync():
     ''' Runs a synchronisation between personal data in ADP and Cascade'''
 
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -2576,7 +2586,9 @@ def adpRejigNewStarters(new_starters,adp_responses,ID_library):
         paybasis_hourly = worker.get("workAssignments", [{}])[active_job_position].get("baseRemuneration", {}).get("hourlyRateAmount", {}).get("nameCode", {}).get("shortName", None)
         pay_hourly = worker.get("workAssignments", [{}])[active_job_position].get("baseRemuneration", {}).get("hourlyRateAmount", {}).get("amountValue", None)
         pay_annual = worker.get("workAssignments", [{}])[active_job_position].get("baseRemuneration", {}).get("annualRateAmount", {}).get("amountValue", None)
-        hireDate = worker.get("workAssignments", [{}])[active_job_position].get("baseRemuneration", {}).get("effectiveDate")
+        hireDate = (
+            worker.get("workAssignments", [{}])[active_job_position].get("baseRemuneration", {}).get("effectiveDate")
+            or worker.get("workerDates", {}).get("originalHireDate"))
         pay_frequency = worker.get("workAssignments", [{}])[active_job_position].get("payCycleCode", {}).get("shortName", None)    
         ADP_id = worker["workAssignments"][active_job_position]["positionID"]
         LM_AOID = worker['workAssignments'][active_job_position].get('reportsTo',[{}])[0].get("associateOID",None)
@@ -2789,7 +2801,7 @@ def PostCreateJobs(POST_jobs, new_start_jobs):
         time.sleep(0.6)
 
 #---------------------------------------- Top Level Function               
-def run_type_4():
+def jobDetailsSync():
     ''' Updates job records'''
 
     time_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -2865,13 +2877,13 @@ if __name__ == "__main__":
             print ("ID library downloaded")
 
         if run_type == 1:
-            runType1()
+            cascadeIdSync()
         elif run_type == 2:
-            runType2(ID_library)
+            absencesSync(ID_library)
         elif run_type == 3:
-            runType3()
+            personalDetailsSync()
         elif run_type == 4:
-            run_type_4()
+            jobDetailsSync()
 
     countries = ["usa","can"]
     #countries = ["can"]           #Use to test Country independently)
